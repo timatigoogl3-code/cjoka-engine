@@ -1,0 +1,27 @@
+# Build
+build/
+build-*/
+out/
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.o
+*.a
+*.so
+*.d
+
+# IDE
+.vscode/.clangd/
+.vscode/c_cpp_properties.json
+.cache/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deps
+.vcpkg/

@@ -1,0 +1,17 @@
+[sjoka] запуск: /home/cune/Изображения/proj/cjoka/build/cjoka (LSAN suppressed)
+────────────────────────────────────────
+[Engine] GL 4.6.0 NVIDIA 595.84 GLSL 4.60 NVIDIA
+[Window] drop .obj/.jpg сюда — быстрый спавн, TAB — браузер ассетов
+[Font] loading assets/fonts/NotoSans-Regular.ttf (555KB) h=26
+[Font] atlas 1024x1024 — ASCII 95 + Cyrillic 256 + symbols 4 (ok)
+[kGUI] init 1280x720 font=default
+[Engine] Application created 1280x720
+[Demo] init
+[Assets] Texture loaded: assets/textures/checker.png (256x256)
+[Assets] Texture loaded: assets/textures/indoor_plant_COL.jpg (2048x2048)
+[MeshLoader] assets/models/indoor_plant.obj verts=137520 tris=45840 bbox 8.26149x9.49414x4.85559 center -0.595144,4.39612,0.494506
+[Assets] Texture loaded: assets/textures/gradient.png (128x128)
+[Demo] entities=27
+[Assets] cache tex=3 alive=3 mesh=5 alive=5 total=8
+[PostProcess] init 1280x720
+[RenderPipeline] HDR 1280x720 + bloom half

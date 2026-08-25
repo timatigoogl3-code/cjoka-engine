@@ -1,0 +1,70 @@
+#include "engine/Core/Window.h"
+#include <stdexcept>
+#include <iostream>
+#include <glad/gl.h>
+#include <GLFW/glfw3.h>
+
+Window::Window(int width, int height, const char* title)
+    : m_width(width), m_height(height) {
+    if (!glfwInit()) throw std::runtime_error("glfwInit failed");
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE); // 4.6 core
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#endif
+    m_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+    if (!m_window) {
+        glfwTerminate();
+        throw std::runtime_error("glfwCreateWindow failed");
+    }
+    glfwMakeContextCurrent(m_window);
+    glfwSwapInterval(1);
+    if (!gladLoadGL(glfwGetProcAddress)) {
+        throw std::runtime_error("gladLoadGL failed");
+    }
+    std::cout << "[Engine] GL " << (const char*)glGetString(GL_VERSION) << " GLSL " << (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION) << "\n";
+    glEnable(GL_DEPTH_TEST);
+    // cull пока выкл — кубы/горшки имели смешанный winding, включаем только где нужно
+    // glEnable(GL_CULL_FACE); glCullFace(GL_BACK); glFrontFace(GL_CCW);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // sRGB framebuffer если hdr pipeline не активен — оставляем linear для HDR
+    // glEnable(GL_FRAMEBUFFER_SRGB); // HDR сам делает гамму
+    setupDropCallback();
+    std::cout << "[Window] drop .obj/.jpg сюда — быстрый спавн, TAB — браузер ассетов\n";
+}
+
+void Window::setupDropCallback(){
+    glfwSetWindowUserPointer(m_window, this);
+    glfwSetDropCallback(m_window, [](GLFWwindow* win, int count, const char** paths){
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(win));
+        if(!self) return;
+        for(int i=0;i<count;++i) self->m_drops.emplace_back(paths[i]);
+        std::cout << "[Window] dropped " << count << " file(s)\n";
+    });
+}
+std::vector<std::string> Window::pollDroppedFiles(){
+    auto out = m_drops;
+    m_drops.clear();
+    return out;
+}
+
+Window::~Window() {
+    if (m_window) {
+        glfwDestroyWindow(m_window);
+        // glfwTerminate вызывается в Application чтобы не убить раньше времени при нескольких окнах
+    }
+}
+
+bool Window::shouldClose() const { return glfwWindowShouldClose(m_window); }
+void Window::setShouldClose(bool v) const { glfwSetWindowShouldClose(m_window, v); }
+void Window::pollEvents() const { glfwPollEvents(); }
+void Window::swapBuffers() const { glfwSwapBuffers(m_window); }
+void Window::getFramebufferSize(int& w, int& h) const { glfwGetFramebufferSize(m_window, &w, &h); }
+void Window::getSize(int& w, int& h) const { glfwGetWindowSize(m_window, &w, &h); }
+bool Window::isKeyPressed(int key) const { return glfwGetKey(m_window, key) == GLFW_PRESS; }
+bool Window::isMouseButtonPressed(int button) const { return glfwGetMouseButton(m_window, button) == GLFW_PRESS; }
+void Window::getCursorPos(double& x, double& y) const { glfwGetCursorPos(m_window, &x, &y); }
+void Window::setCursorMode(int mode) const { glfwSetInputMode(m_window, GLFW_CURSOR, mode); }
+float Window::getTime() const { return (float)glfwGetTime(); }

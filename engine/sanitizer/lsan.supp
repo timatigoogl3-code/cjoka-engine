@@ -1,0 +1,11 @@
+# LSAN suppressions for GLFW / X11 / Wayland — ложные лики системных библиотек
+leak:libglfw
+leak:libdecor
+leak:libX11
+leak:libxcb
+leak:libwayland
+leak:libXi
+leak:libGLX
+leak:libGL
+leak:libEGL
+leak:libdecor-0

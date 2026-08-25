@@ -1,0 +1,28 @@
+{
+  "objects": [
+    {
+      "model": "assets/models/indoor_plant.obj",
+      "texture": "assets/textures/indoor_plant_COL.jpg",
+      "pos": [0, -0.35, -2.0],
+      "rot": [0, 0, 0],
+      "scale": [0.18, 0.18, 0.18],
+      "name": "PlantMain"
+    },
+    {
+      "model": "assets/models/indoor_plant.obj",
+      "texture": "assets/textures/indoor_plant_COL.jpg",
+      "pos": [2.2, -0.35, 0.5],
+      "rot": [0, 45, 0],
+      "scale": [0.16, 0.16, 0.16],
+      "name": "Plant2"
+    },
+    {
+      "model": "cube",
+      "pos": [0, 0.5, 2.0],
+      "scale": [0.8, 0.8, 0.8],
+      "color": [1, 0.9, 0.6],
+      "shininess": 64,
+      "name": "CubeA_json"
+    }
+  ]
+}
