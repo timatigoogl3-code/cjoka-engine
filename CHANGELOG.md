@@ -2,6 +2,28 @@
 
 Формат: SemVer-подобные версии движка. Даты — 2026.
 
+## [0.35] — 2026-08-25 — PBR + мягкие тени + CCD
+
+### Engine
+- **PBR освещение** (Cook-Torrance GGX): metallic/roughness/ao в `Material`,
+  энергосбережение, Френель (Schlick), GGX-распределение, Smith-геометрия
+  - Работает в обоих путях рендера (Lit и Instanced/Batcher)
+  - `InstanceData` упаковывает roughness (albedo.a) и metallic (emissive.a)
+- **Мягкие тени**: Poisson disk 12 сэмплов, радиус растёт с дистанцией,
+  fade к 60м (нет жёсткой границы shadow map)
+- **Тонемаппинг перенесён в composite**: exposure+ACES+gamma+saturation
+  применяется ко всему кадру единообразно (раньше пёклось в объектных шейдерах)
+- **Физика**: CCD для динамических тел >20см (без туннелирования),
+  сон тел (sleepThreshold 0.05), solver 4/1, ThrowFrom будит+CCD
+- `PushAt` игнорирует kinematic (не пинает CCT), рейкаст с userdata per-actor
+
+### Demo
+- PBR-витрина: хром/медь/шероховатый пластик, ряд roughness 0.15→0.9
+- Пол — prototype-сетка 1METER (конечный физический бокс, за краем пустота),
+  коробки — GridBox_Default; уборка тел, упавших ниже y<-30
+- CCT толкает ящики плечом при ходьбе; F-бросок с начальной скоростью
+
+## [0.30] — 2026-08-25 — Тени + PhysX
 ## [0.30] — 2026-08-25 — Тени + PhysX
 
 ### Engine

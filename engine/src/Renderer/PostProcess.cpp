@@ -93,12 +93,16 @@ void Blur(GLuint tex,GLuint outFBO,glm::vec2 dir){
     glBindTexture(GL_TEXTURE_2D,tex);
     DrawFullscreen();
 }
-void Composite(GLuint sceneTex,GLuint bloomTex,float bloomIntensity,float vignette){
+void Composite(GLuint sceneTex,GLuint bloomTex,float bloomIntensity,float vignette,
+               float exposure,float gamma,float saturation){
     s_composite->use();
     s_composite->setInt("uScene",0);
     s_composite->setInt("uBloom",1);
     s_composite->setFloat("uBloomIntensity",bloomIntensity);
     s_composite->setFloat("uVignette",vignette);
+    s_composite->setFloat("uExposure",exposure);
+    s_composite->setFloat("uGamma",gamma);
+    s_composite->setFloat("uSaturation",saturation);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D,sceneTex);
     glActiveTexture(GL_TEXTURE1);

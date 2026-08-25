@@ -17,8 +17,8 @@ struct Vertex {
 
 struct InstanceData {
     glm::mat4 model{1.0f};
-    glm::vec4 albedo{1.0f, 1.0f, 1.0f, 32.0f}; // rgb + shininess in w
-    glm::vec4 emissive{0.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 albedo{1.0f, 1.0f, 1.0f, 0.5f};   // rgb + roughness (PBR)
+    glm::vec4 emissive{0.0f, 0.0f, 0.0f, 0.0f}; // rgb + metallic (PBR)
 };
 
 class Mesh3D {

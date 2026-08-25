@@ -53,10 +53,11 @@ void Demo::onInit() {
     m_litShader = std::make_unique<Shader>(DefaultShaders::kLitVS, DefaultShaders::kLitFS);
     setupWorld();
 
-    // Пол (визуал + статический plane в PhysX)
-    auto texChecker = Assets::Texture("assets/textures/checker.png");
-    scene().createQuad({{0,0,0},{-90,0,0},{14,14,1}}, texturedMaterial(texChecker,glm::vec3(1),24), 1.5f, "Ground");
-    m_phys->CreateGroundPlane();
+    // Пол — prototype-сетка 1METER
+    auto texFloor = Assets::Texture("assets/textures/prototype_floor.png");
+    scene().createQuad({{0,0,0},{-90,0,0},{14,14,1}}, texturedMaterial(texFloor,glm::vec3(1),24), 1.75f, "Ground");
+    // физический пол = КОНЕЧНЫЙ бокс ровно по визуалу (21x21), за краем — пустота
+    m_phys->CreateBoxActor({0,-0.05f,0}, {10.5f,0.05f,10.5f}, false, 0);
 
     // Платформа-ступеньки (статика)
     Material plat; plat.albedo={0.75f,0.72f,0.66f}; plat.shininess=8;
@@ -66,12 +67,12 @@ void Demo::onInit() {
     for (int i=0;i<3;++i)
         m_phys->CreateBoxActor({float(i)*-1.6f - 1.6f, 0.25f + i*0.5f, -2.f}, {1.5f, 0.5f*(i+1), 1.5f}, false, 0);
 
-    // Башня из ящиков — динамическая, упадёт от толчка
-    auto texGradient = Assets::Texture("assets/textures/gradient.png");
+    // Башня из ящиков — GridBox прототип-текстура
+    auto texGridBox = Assets::Texture("assets/textures/GridBox_Default.png");
     for (int y=0;y<4;++y) for(int x=0;x<2;++x){
         float px = 2.0f + x*0.62f, py = 0.31f + y*0.62f;
         auto e = MakeBox(scene(), {px,py,-1.5f}, {0.6f,0.6f,0.6f},
-                         texturedMaterial(texGradient,glm::vec3(1),48), "Crate");
+                         texturedMaterial(texGridBox,glm::vec3(1),48), "Crate");
         registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody{});
         m_debris.push_back(e);
     }
@@ -126,6 +127,12 @@ void Demo::handlePlayerInput(float dt) {
     m_onGround = m_phys->MoveCharacter(m_cct, disp, dt, m_playerPos);
     m_playerVel.y = m_onGround ? 0 : vy;
 
+    // толкаем ящики плечом при ходьбе
+    if (glm::length(move) > 0.5f) {
+        glm::vec3 pushDir = glm::normalize(move);
+        m_phys->PushAt(m_playerPos + glm::vec3{0,0.35f,0} + pushDir*0.55f, pushDir, 0.6f, 2.2f*dt*60.0f*0.016f + 1.5f);
+    }
+
     // камера следует за игроком (глаза)
     camTr.position = m_playerPos + glm::vec3{0,0.65f,0};
 }
@@ -142,11 +149,14 @@ void Demo::onUpdate(float dt) {
         glm::vec3 dir{std::cos(yaw)*std::cos(pitch), std::sin(pitch), std::sin(yaw)*std::cos(pitch)};
         dir.z = -dir.z;
         dir = glm::normalize(dir);
-        auto texG = Assets::Texture("assets/textures/gradient.png");
+        auto texG = Assets::Texture("assets/textures/GridBox_Default.png");
         auto e = MakeBox(scene(), camTr.position + dir*1.2f, glm::vec3{0.4f,0.4f,0.4f},
                          texturedMaterial(texG,{1,1,1},48), "Thrown"+std::to_string(m_spawned++));
         registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody{});
         m_debris.push_back(e);
+        // сразу актор + начальная скорость (иначе падает под ногами)
+        m_phys->BuildFromECS(registry());
+        m_phys->ThrowFrom(e, dir*9.0f + glm::vec3{0,2.5f,0});
         std::cout << "[Demo] thrown box #" << m_spawned << "\n";
     }
     fDown=f;
@@ -159,12 +169,26 @@ void Demo::onUpdate(float dt) {
         float yaw=glm::radians(camTr.rotation.y), pitch=glm::radians(camTr.rotation.x);
         glm::vec3 dir{std::cos(yaw)*std::cos(pitch), std::sin(pitch), std::sin(yaw)*std::cos(pitch)};
         dir.z=-dir.z; dir=glm::normalize(dir);
-        m_phys->PushAt(camTr.position, dir, 6.0f, 12.0f);
+        glm::vec3 origin = camTr.position + dir*0.8f; // вне капсулы CCT
+        m_phys->PushAt(origin, dir, 6.0f, 14.0f);
     }
     lmb=mb;
 
     // Физика шаг + синк
     m_phys->Step(dt);
+
+    // упали в пустоту — удаляем
+    m_debris.erase(std::remove_if(m_debris.begin(), m_debris.end(), [&](Entity e){
+        if (!registry().valid(e)) return true;
+        auto* rb = registry().try_get<cjoka_phys::Rigidbody>(e);
+        auto* tr = registry().try_get<Transform>(e);
+        if (tr && tr->position.y < -30.0f) {
+            if (rb && rb->pxActor) m_phys->RemoveActor(rb->pxActor);
+            scene().destroy(e);
+            return true;
+        }
+        return false;
+    }), m_debris.end());
 
     // новые Rigidbody -> акторы, потом синк позиций
     m_phys->BuildFromECS(registry());

@@ -17,7 +17,8 @@ void DrawFullscreen();
 void Tonemap(GLuint hdrTex, float exposure = 1.0f, float gamma = 2.2f);
 void BloomExtract(GLuint hdrTex, GLuint outFBO, float threshold = 1.0f);
 void Blur(GLuint tex, GLuint outFBO, glm::vec2 dir); // dir = (1,0) или (0,1)
-void Composite(GLuint sceneTex, GLuint bloomTex, float bloomIntensity = 0.6f, float vignette = 0.35f);
+void Composite(GLuint sceneTex, GLuint bloomTex, float bloomIntensity = 0.6f, float vignette = 0.35f,
+               float exposure = 1.0f, float gamma = 2.2f, float saturation = 1.06f);
 void FXAA(GLuint tex);
 
 } // namespace PostProcess

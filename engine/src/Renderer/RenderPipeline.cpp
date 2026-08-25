@@ -91,10 +91,10 @@ void RenderPipeline::endFrame(){
         m_composite.bind();
         glDisable(GL_DEPTH_TEST);
         if(m_settings.bloom){
-            PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette);
+            PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
         } else {
             // без bloom — просто blit HDR с vignette
-            PostProcess::Composite(m_hdr.colorTexture(), m_hdr.colorTexture(), 0.0f, m_settings.vignette);
+            PostProcess::Composite(m_hdr.colorTexture(), m_hdr.colorTexture(), 0.0f, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
         }
         // 4. FXAA -> default
         glBindFramebuffer(GL_FRAMEBUFFER,0);
@@ -106,7 +106,7 @@ void RenderPipeline::endFrame(){
         glBindFramebuffer(GL_FRAMEBUFFER,0);
         glViewport(0,0,m_w,m_h);
         if(m_settings.bloom){
-            PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette);
+            PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
         } else {
             // просто blit HDR
             m_hdr.blitToDefault();

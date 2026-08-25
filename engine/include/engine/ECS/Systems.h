@@ -115,7 +115,9 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
         shader.setMat4("uModel", model);
         shader.setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
         shader.setVec3("uAlbedo", mr.material.albedo);
-        shader.setFloat("uShininess", mr.material.shininess);
+        shader.setFloat("uMetallic", mr.material.metallic);
+        shader.setFloat("uRoughness", mr.material.roughness <= 0.02f ? 0.5f : mr.material.roughness);
+        shader.setFloat("uAO", mr.material.ao);
         shader.setVec3("uEmissive", mr.material.emissive);
         if (mr.material.useDiffuseMap && mr.material.diffuseMap && mr.material.diffuseMap->valid()) {
             shader.setBool("uUseDiffuseMap", true);

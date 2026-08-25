@@ -25,8 +25,8 @@ void Batcher::submit(const Transform& tr, const MeshRenderer& mr) {
     }
     InstanceData inst;
     inst.model = tr.matrix();
-    inst.albedo = glm::vec4(mr.material.albedo, mr.material.shininess);
-    inst.emissive = glm::vec4(mr.material.emissive, 1.0f);
+    inst.albedo = glm::vec4(mr.material.albedo, mr.material.roughness);
+    inst.emissive = glm::vec4(mr.material.emissive, mr.material.metallic);
     it->second.instances.push_back(inst);
 }
 

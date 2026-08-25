@@ -1,4 +1,5 @@
 #include "engine/Physics/Physics.h"
+#include <algorithm>
 #include "engine/ECS/Registry.h"
 #include <glm/gtc/quaternion.hpp>
 
@@ -95,12 +96,23 @@ void World::Step(float dt) {
     }
 }
 
+static void SetupDynamic(PxRigidDynamic* d, const glm::vec3& he) {
+    // CCD для быстрых объектов (габарит > 20см)
+    float maxDim = std::max({he.x,he.y,he.z});
+    if (maxDim > 0.2f) d->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true);
+    // сон: уснул — не считаем (энергосбережение FPS)
+    d->setSleepThreshold(0.05f);
+    d->setSolverIterationCounts(4, 1); // достаточно для ящиков
+}
 void* World::CreateBoxActor(const glm::vec3& pos, const glm::vec3& he, bool dyn, float density) {
     PxBoxGeometry geo(he.x, he.y, he.z);
     PxTransform t(PxVec3(pos.x,pos.y,pos.z));
-    PxRigidActor* a = dyn
-        ? static_cast<PxRigidActor*>(PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density))
-        : static_cast<PxRigidActor*>(PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat));
+    PxRigidActor* a;
+    if (dyn) {
+        auto* d = PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density);
+        SetupDynamic(d, he);
+        a = d;
+    } else a = PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat);
     m_impl->scene->addActor(*a);
     m_impl->actors.push_back(a);
     return a;
@@ -108,9 +120,12 @@ void* World::CreateBoxActor(const glm::vec3& pos, const glm::vec3& he, bool dyn,
 void* World::CreateSphereActor(const glm::vec3& pos, float r, bool dyn, float density) {
     PxSphereGeometry geo(r);
     PxTransform t(PxVec3(pos.x,pos.y,pos.z));
-    PxRigidActor* a = dyn
-        ? static_cast<PxRigidActor*>(PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density))
-        : static_cast<PxRigidActor*>(PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat));
+    PxRigidActor* a;
+    if (dyn) {
+        auto* d = PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density);
+        SetupDynamic(d, {r,r,r});
+        a = d;
+    } else a = PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat);
     m_impl->scene->addActor(*a);
     m_impl->actors.push_back(a);
     return a;
@@ -163,7 +178,7 @@ Entity World::Raycast(Registry&, const glm::vec3& o, const glm::vec3& dir, float
     if (op) *op = { hit.block.position.x, hit.block.position.y, hit.block.position.z };
     if (on) *on = { hit.block.normal.x, hit.block.normal.y, hit.block.normal.z };
     auto* ud = hit.block.actor ? hit.block.actor->userData : nullptr;
-    return ud ? *static_cast<Entity*>(ud) : NullEntity;
+    return ud ? (Entity)(uintptr_t)ud : NullEntity;
 }
 
 void World::AddImpulse(Entity e, const glm::vec3&) {}
@@ -172,6 +187,8 @@ void World::ThrowFrom(Entity e, const glm::vec3& vel) {
     auto& rb = m_reg->get<Rigidbody>(e);
     if (!rb.pxActor || rb.kind != Rigidbody::Kind::Dynamic) return;
     auto* d = static_cast<PxRigidDynamic*>(rb.pxActor);
+    d->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true); // быстрый полёт — без туннелирования
+    d->wakeUp();
     d->setLinearVelocity(PxVec3(vel.x, vel.y, vel.z));
 }
 
@@ -187,6 +204,8 @@ void World::PushAt(const glm::vec3& origin, const glm::vec3& dir, float maxDist,
     if (!actor) return;
     auto* dyn = actor->is<PxRigidDynamic>();
     if (!dyn) return; // статика не толкается
+    // кинематики (в т.ч. CCT персонажа) не толкаем
+    if (dyn->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC) return;
     PxVec3 imp(dir.x,dir.y,dir.z);
     imp = imp.getNormalized() * force;
     dyn->addForce(imp, PxForceMode::eIMPULSE);
@@ -204,9 +223,7 @@ void World::BuildActors(Registry& reg) {
         void* actor = CreateBoxActor(tr.position, tr.scale*0.5f, dyn, rb.density);
         rb.pxActor = actor;
         if (actor) {
-            static thread_local Entity ud; // TODO: хранить per-actor
-            ud = e;
-            static_cast<PxRigidActor*>(actor)->userData = &ud;
+            static_cast<PxRigidActor*>(actor)->userData = (void*)(uintptr_t)e;
         }
     }
 }
