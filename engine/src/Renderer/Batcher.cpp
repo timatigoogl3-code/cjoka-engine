@@ -1,4 +1,5 @@
 #include "engine/Renderer/Batcher.h"
+#include "engine/Renderer/ShadowMap.h"
 #include "engine/ECS/Registry.h"
 #include "engine/Renderer/DefaultShaders.h"
 #include "engine/Renderer/Shader.h"
@@ -35,7 +36,7 @@ size_t Batcher::totalInstances() const {
     return n;
 }
 
-void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos) {
+void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, ShadowMap* shadow) {
     if (m_batches.empty()) return;
     static Shader* instanced = nullptr;
     if (!instanced) instanced = new Shader(DefaultShaders::kLitInstancedVS, DefaultShaders::kLitInstancedFS);
@@ -61,6 +62,13 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
     instanced->setFloat("uFogDensity", fogDen);
     instanced->setFloat("uExposure", exposure);
     instanced->setFloat("uTime", (float)glfwGetTime());
+    // тени
+    instanced->setBool("uHasShadow", shadow && shadow->ready());
+    if (shadow && shadow->ready()) {
+        instanced->setMat4("uLightMatrix", shadow->matrix());
+        instanced->setInt("uShadowMap", 2);
+        shadow->Bind(2);
+    }
 
     // Lights
     auto ambients = reg.view<AmbientLight>();

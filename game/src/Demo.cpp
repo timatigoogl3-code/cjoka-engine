@@ -4,184 +4,198 @@
 #include <sstream>
 
 // ============================================================
-//  ДЕМКА ВОЗМОЖНОСТЕЙ ДВИЖКА cjoka
-//  Что показываем (всё движком, без читов):
-//   1. Загрузка тяжёлого .obj — горшок 137k вершин / 45k треугольников
-//   2. Текстуры 2048x2048 + mipmaps + anisotropy 8x
-//   3. Blinn-Phong свет: ambient + directional + 4 point light
-//   4. Материалы: albedo/shininess/emissive/specular
-//   5. Небо: градиент + солнце + звёзды; туман exponential
-//   6. HDR pipeline: bloom (half-res ping-pong) + ACES tonemap + vignette + FXAA
-//   7. Автобатчинг: ряд одинаковых объектов → 1 draw call
-//   8. kGUI: кириллица, панели, HUD с fps
-//  Управление: WASD+QE полёт, ПКМ мышь, Shift ускорение.
-//  Клавиши демо: 1-4 пресеты PP, B bloom, F fxaa, [ ] exposure, P спавн горшка.
+//  cjoka DEMO — рендер GL4.6 + NVIDIA PhysX 5.5
+//   • Гравитация и падение объектов (Rigidbody Dynamic)
+//   • Статика: пол/платформы
+//   • Character Controller: WASD ходьба, Space прыжок, ступеньки
+//   • F — кинуть ящик вперёд (impulse)
+//   • Рендер: HDR bloom, FXAA, sky, fog, batching, kGUI
 // ============================================================
 
-Demo::Demo() : Application(1280, 720, "cjoka engine demo — OBJ • HDR • Bloom • FXAA • Batching • kGUI") {}
+static Entity MakeBox(Scene& sc, glm::vec3 pos, glm::vec3 scale, const Material& m, const std::string& name) {
+    return sc.createCube({pos, {}, scale}, m, name);
+}
+
+Demo::Demo() : Application(1280,720,"cjoka demo — PhysX 5.5 + HDR pipeline") {}
 Demo::~Demo() = default;
 
-void Demo::setupAtmosphere() {
+void Demo::setupWorld() {
     scene().createBeautifulAtmosphere(
         {.top{0.16f,0.40f,0.86f}, .horizon{0.60f,0.74f,0.94f}, .bottom{0.88f,0.90f,0.95f}, .exposure=1.08f},
-        {.color{0.10f,0.12f,0.16f}, .density=0.012f});
+        {.color{0.10f,0.12f,0.16f}, .density=0.010f});
     scene().createPost(PostProcessSettings::Cinematic());
+    registry().emplace<AmbientLight>(scene().create("Ambient"), AmbientLight{{0.20f,0.20f,0.25f},1});
+    scene().createDirectionalLight({-0.55f,-1,-0.35f},{1.0f,0.96f,0.88f},1.35f,"Sun");
+    scene().createPointLight({{2.4f,2.2f,1.4f}}, {.color{1.0f,0.75f,0.42f}, .intensity=1.6f, .range=15}, "Warm");
 }
 
-void Demo::setupLights() {
-    registry().emplace<AmbientLight>(scene().create("Ambient"), AmbientLight{{0.20f,0.20f,0.25f}, 1.0f});
-    scene().createDirectionalLight({-0.55f,-1.0f,-0.35f}, {1.0f,0.96f,0.88f}, 1.35f, "Sun");
-    scene().createPointLight({{ 2.4f,2.2f,1.4f}}, {.color{1.00f,0.75f,0.42f}, .intensity=1.7f, .range=15.0f}, "Warm");
-    scene().createPointLight({{-2.2f,1.4f,-1.8f}}, {.color{0.42f,0.70f,1.00f}, .intensity=1.4f, .range=13.0f}, "Cold");
-    scene().createPointLight({{ 0.0f,3.6f,0.0f}}, {.color{1.00f,1.00f,1.00f}, .intensity=0.9f, .range=24.0f}, "Rim");
-}
-
-void Demo::setupShowcase() {
-    // Пол
-    auto texChecker = Assets::Texture("assets/textures/checker.png");
-    scene().createQuad({{0,-0.9f,0},{-90,0,0},{9,9,1}},
-                       texturedMaterial(texChecker, glm::vec3(1), 24), 1.5f, "Ground");
-
-    // 1) Тяжёлая модель: горшок 137k verts, текстура 2048 COL
-    m_plant = Assets::QuickSpawn(scene(), "assets/models/indoor_plant.obj",
-                                 {{0,-0.35f,-1.6f},{0,-20,0},{0.20f,0.20f,0.20f}});
-
-    // 2) Металлическая сфера — specular/shininess
-    m_metalSphere = scene().createSphere({{-2.3f,-0.45f,-0.6f}},
-        {.albedo{0.92f,0.93f,0.97f}, .metallic=0.85f, .shininess=160}, 0.45f, "MetalSphere");
-
-    // 3) Emissive шар — питает bloom
-    m_emissiveOrb = scene().createSphere({{2.3f,1.1f,-0.8f}},
-        {.albedo{1,1,1}, .emissive{2.4f,1.6f,0.7f}, .shininess=32}, 0.22f, "EmissiveOrb");
-
-    // 4) Батчинг: 8 одинаковых кубиков разного цвета → 1 draw call
-    for (int i = 0; i < 8; ++i) {
-        float x = -1.75f + i * 0.5f;
-        Material m;
-        m.albedo = {0.85f + 0.02f*i, 0.45f + 0.06f*i, 0.30f + 0.09f*i};
-        m.shininess = 90;
-        auto e = scene().createCube({{x,-0.68f,1.6f},{0,float(i)*22,0},{0.28f,0.28f,0.28f}}, m, "Batch"+std::to_string(i));
-        m_batchRow.push_back(e);
-    }
-
-    // 5) Текстурированные кубы по бокам
-    auto texGradient = Assets::Texture("assets/textures/gradient.png");
-    scene().createCube({{-3.4f,0.1f,0.4f}}, texturedMaterial(texGradient, glm::vec3(1), 48), "TexCubeL");
-    scene().createCube({{ 3.4f,0.1f,0.4f}}, texturedMaterial(texGradient, glm::vec3(1), 48), "TexCubeR");
-
-    m_camera = scene().createCamera({{0,1.7f,5.2f},{-11,-90,0}}, {55.0f,0.1f,120.0f,true}, "MainCamera");
+void Demo::setupPlayer() {
+    // CCT капсула: radius 0.35 height 1.2 (глаза ~1.7)
+    m_cct = m_phys->CreateCharacter(m_playerPos, 0.35f, 1.2f);
 }
 
 void Demo::setupGUI() {
     registry().emplace<Panel2D>(scene().create("HUDPanel"),
-        Panel2D{{12,12},{430,86}, {0.06f,0.07f,0.10f,0.80f}, 10});
+        Panel2D{{12,12},{430,86},{0.06f,0.07f,0.10f,0.80f},10});
     registry().emplace<Text2D>(scene().create("Title"),
-        Text2D{"cjoka — демка движка", {24,18}, 1.05f, {1,0.96f,0.84f,1}});
+        Text2D{"cjoka + PhysX 5.5", {24,18}, 1.05f, {1,0.96f,0.84f,1}});
     registry().emplace<Text2D>(scene().create("Sub"),
-        Text2D{"GL 4.6 • OBJ 137k • HDR Bloom • FXAA • Batching", {24,46}, 0.58f, {0.82f,0.87f,0.95f,1}});
+        Text2D{"CCT ходьба+прыжок • динамика ящиков • HDR bloom", {24,46}, 0.58f, {0.82f,0.87f,0.95f,1}});
     registry().emplace<Text2D>(scene().create("Hint"),
-        Text2D{"WASD+QE • ПКМ обзор • 1-4 PP • B bloom • F fxaa • [ ] экспозиция", {24,68}, 0.52f, {0.66f,0.72f,0.80f,1}});
+        Text2D{"WASD • Space прыжок • F кинуть ящик • ПКМ обзор", {24,68}, 0.52f, {0.66f,0.72f,0.80f,1}});
 }
 
 void Demo::onInit() {
     std::cout << "[Demo] init\n";
+    cjoka_phys::Global::Init();
+    m_phys = std::make_unique<cjoka_phys::World>(glm::vec3{0,-9.81f,0});
+
     m_litShader = std::make_unique<Shader>(DefaultShaders::kLitVS, DefaultShaders::kLitFS);
+    setupWorld();
 
-    setupAtmosphere();
-    setupLights();
-    setupShowcase();
+    // Пол (визуал + статический plane в PhysX)
+    auto texChecker = Assets::Texture("assets/textures/checker.png");
+    scene().createQuad({{0,0,0},{-90,0,0},{14,14,1}}, texturedMaterial(texChecker,glm::vec3(1),24), 1.5f, "Ground");
+    m_phys->CreateGroundPlane();
+
+    // Платформа-ступеньки (статика)
+    Material plat; plat.albedo={0.75f,0.72f,0.66f}; plat.shininess=8;
+    for (int i=0;i<3;++i)
+        MakeBox(scene(), {float(i)*-1.6f - 1.6f, 0.25f + i*0.5f, -2.f}, {1.5f,0.25f+i*0.5f>0?0.5f+i*0.5f:0.5f, 1.5f}, plat, ("Step"+std::to_string(i)).c_str());
+    // физика для платформ — статические боксы (визуал выше совпадает по габаритам приблизительно)
+    for (int i=0;i<3;++i)
+        m_phys->CreateBoxActor({float(i)*-1.6f - 1.6f, 0.25f + i*0.5f, -2.f}, {1.5f, 0.5f*(i+1), 1.5f}, false, 0);
+
+    // Башня из ящиков — динамическая, упадёт от толчка
+    auto texGradient = Assets::Texture("assets/textures/gradient.png");
+    for (int y=0;y<4;++y) for(int x=0;x<2;++x){
+        float px = 2.0f + x*0.62f, py = 0.31f + y*0.62f;
+        auto e = MakeBox(scene(), {px,py,-1.5f}, {0.6f,0.6f,0.6f},
+                         texturedMaterial(texGradient,glm::vec3(1),48), "Crate");
+        registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody{});
+        m_debris.push_back(e);
+    }
+
+    // Горшок — тяжёлая моделька как декор (без физики, статика сцены)
+    Assets::QuickSpawn(scene(), "assets/models/indoor_plant.obj",
+                       {{-3.2f,0,-1.0f},{0,-30,0},{0.18f,0.18f,0.18f}});
+
+    m_camera = scene().createCamera({{0,1.7f,4.5f},{0,-90,0}}, {55.0f,0.1f,120.0f,true}, "MainCamera");
+
+    setupPlayer();
     setupGUI();
-
     std::cout << "[Demo] entities=" << scene().alive() << "\n";
-    Assets::Stats();
+}
+
+void Demo::handlePlayerInput(float dt) {
+    if (!m_cct || !registry().valid(m_camera)) return;
+    auto& camTr = registry().get<Transform>(m_camera);
+
+    // --- Обзор: ТОЛЬКО ПКМ вращает взгляд, камера не двигается ---
+    static bool grabbing=false; static double lastX=0,lastY=0;
+    bool mb = window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT);
+    if (mb) {
+        if (!grabbing) { grabbing=true; window().setCursorMode(GLFW_CURSOR_DISABLED); lastX=0; lastY=0; }
+        double x,y; window().getCursorPos(x,y);
+        if (lastX==0 && lastY==0) { lastX=x; lastY=y; }
+        float dx=static_cast<float>(x-lastX), dy=static_cast<float>(y-lastY);
+        lastX=x; lastY=y;
+        camTr.rotation.y += dx*0.15f;
+        camTr.rotation.x -= dy*0.15f;
+        camTr.rotation.x = glm::clamp(camTr.rotation.x, -89.0f, 89.0f);
+    } else if (grabbing) { grabbing=false; window().setCursorMode(GLFW_CURSOR_NORMAL); }
+
+    // --- Движение: ТОЧНО та же формула что Camera::viewFromTransform ---
+    float yaw = glm::radians(camTr.rotation.y);
+    glm::vec3 fwd{ std::cos(yaw), 0, std::sin(yaw) }; // yaw=-90 → (0,0,-1) = взгляд
+    fwd = glm::normalize(fwd);
+    glm::vec3 right{ -fwd.z, 0, fwd.x };              // cross(fwd, up) → при взгляде -Z право = +X
+
+    glm::vec3 move{};
+    if (window().isKeyPressed(GLFW_KEY_W)) move += fwd;
+    if (window().isKeyPressed(GLFW_KEY_S)) move -= fwd;
+    if (window().isKeyPressed(GLFW_KEY_A)) move -= right;
+    if (window().isKeyPressed(GLFW_KEY_D)) move += right;
+    if (glm::length(move)>0.001f) move = glm::normalize(move)*4.0f;
+
+    float vy = m_playerVel.y;
+    if (m_onGround && window().isKeyPressed(GLFW_KEY_SPACE)) vy = 5.0f;
+    vy -= 9.81f*dt*1.6f;
+
+    glm::vec3 disp = (move + glm::vec3{0,vy,0}) * dt;
+    m_onGround = m_phys->MoveCharacter(m_cct, disp, dt, m_playerPos);
+    m_playerVel.y = m_onGround ? 0 : vy;
+
+    // камера следует за игроком (глаза)
+    camTr.position = m_playerPos + glm::vec3{0,0.65f,0};
 }
 
 void Demo::onUpdate(float dt) {
-    Systems::FlyCameraSystem(registry(), window(), dt);
-    m_time += dt;
+    handlePlayerInput(dt); // мышь=обзор, WASD=ходьба, Space=прыжок (FlyCameraSystem отключён — он дублировал управление)
 
-    // Анимации витрины
-    if (registry().valid(m_emissiveOrb)) {
-        auto& tr = registry().get<Transform>(m_emissiveOrb);
-        tr.position.y = 1.1f + std::sin(m_time*1.4f)*0.35f;
-        tr.position.x = 2.3f + std::cos(m_time*0.9f)*0.45f;
+    static bool fDown=false;
+    bool f = window().isKeyPressed(GLFW_KEY_F);
+    if (f && !fDown && registry().valid(m_camera)) {
+        // спавн ящика перед камерой + полёт вперёд (динамике задаём скорость через transform sync)
+        auto& camTr = registry().get<Transform>(m_camera);
+        float yaw=glm::radians(camTr.rotation.y), pitch=glm::radians(camTr.rotation.x);
+        glm::vec3 dir{std::cos(yaw)*std::cos(pitch), std::sin(pitch), std::sin(yaw)*std::cos(pitch)};
+        dir.z = -dir.z;
+        dir = glm::normalize(dir);
+        auto texG = Assets::Texture("assets/textures/gradient.png");
+        auto e = MakeBox(scene(), camTr.position + dir*1.2f, glm::vec3{0.4f,0.4f,0.4f},
+                         texturedMaterial(texG,{1,1,1},48), "Thrown"+std::to_string(m_spawned++));
+        registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody{});
+        m_debris.push_back(e);
+        std::cout << "[Demo] thrown box #" << m_spawned << "\n";
     }
-    if (!m_batchRow.empty()) {
-        float base = -1.75f;
-        for (size_t i = 0; i < m_batchRow.size(); ++i)
-            if (registry().valid(m_batchRow[i]))
-                registry().get<Transform>(m_batchRow[i]).position.y =
-                    -0.68f + std::sin(m_time*2.0f + float(i)*0.7f)*0.12f;
-        (void)base;
-    }
+    fDown=f;
 
-    // Тёплый свет плавает
-    for (Entity e : registry().view<PointLight, Transform>()) {
-        auto& pl = registry().get<PointLight>(e);
-        if (pl.color.r > 0.9f && pl.color.g > 0.5f && pl.color.b < 0.6f) {
-            auto& tr = registry().get<Transform>(e);
-            tr.position.x =  2.4f + std::cos(m_time*0.7f)*0.5f;
-            tr.position.y =  2.2f + std::sin(m_time*1.1f)*0.3f;
-        }
+    // ЛКМ — толкнуть объект под прицелом (как рука)
+    static bool lmb=false;
+    bool mb = window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT);
+    if (mb && !lmb && registry().valid(m_camera)) {
+        auto& camTr = registry().get<Transform>(m_camera);
+        float yaw=glm::radians(camTr.rotation.y), pitch=glm::radians(camTr.rotation.x);
+        glm::vec3 dir{std::cos(yaw)*std::cos(pitch), std::sin(pitch), std::sin(yaw)*std::cos(pitch)};
+        dir.z=-dir.z; dir=glm::normalize(dir);
+        m_phys->PushAt(camTr.position, dir, 6.0f, 12.0f);
     }
+    lmb=mb;
 
-    // PP хоткеи
-    static bool k1=false,k2=false,k3=false,k4=false,kB=false,kF=false,kL=false,kR=false,kP=false;
-    bool n1=window().isKeyPressed(GLFW_KEY_1), n2=window().isKeyPressed(GLFW_KEY_2),
-         n3=window().isKeyPressed(GLFW_KEY_3), n4=window().isKeyPressed(GLFW_KEY_4),
-         nb=window().isKeyPressed(GLFW_KEY_B), nf=window().isKeyPressed(GLFW_KEY_F),
-         nl=window().isKeyPressed(GLFW_KEY_LEFT_BRACKET), nr=window().isKeyPressed(GLFW_KEY_RIGHT_BRACKET),
-         np=window().isKeyPressed(GLFW_KEY_P);
-    if (auto v = registry().view<PostProcessSettings>(); !v.empty()) {
-        auto& pp = registry().get<PostProcessSettings>(v[0]);
-        if (n1 && !k1) pp = PostProcessSettings::Cinematic();
-        if (n2 && !k2) pp = PostProcessSettings::Vibrant();
-        if (n3 && !k3) pp = PostProcessSettings::Soft();
-        if (n4 && !k4) pp = PostProcessSettings::Night();
-        if (nb && !kB) pp.bloom = !pp.bloom;
-        if (nf && !kF) pp.fxaa  = !pp.fxaa;
-        if (nl && !kL) pp.exposure = std::max(0.5f, pp.exposure-0.05f);
-        if (nr && !kR) pp.exposure = std::min(2.0f, pp.exposure+0.05f);
-    }
-    if (np && !kP) {
-        float x = float(rand()%160 - 80)/40.0f, z = float(rand()%160 - 80)/40.0f;
-        Assets::QuickSpawn(scene(), "assets/models/indoor_plant.obj",
-                           {{x,-0.35f,z},{0,float(rand()%360),0},{0.14f,0.14f,0.14f}});
-    }
-    k1=n1;k2=n2;k3=n3;k4=n4;kB=nb;kF=nf;kL=nl;kR=nr;kP=np;
+    // Физика шаг + синк
+    m_phys->Step(dt);
 
-    // Кадр
+    // новые Rigidbody -> акторы, потом синк позиций
+    m_phys->BuildFromECS(registry());
+    m_phys->SyncToECS(registry());
+
     int w,h; window().getFramebufferSize(w,h);
-    static std::unique_ptr<RenderPipeline> pipe;
-    if (!pipe) pipe = std::make_unique<RenderPipeline>(w,h);
-    pipe->resize(w,h);
-    pipe->syncFromRegistry(registry());
-    pipe->beginFrame();
+    if (!m_pipe) m_pipe = std::make_unique<RenderPipeline>(w,h);
+    m_pipe->resize(w,h);
+    m_pipe->syncFromRegistry(registry());
+    m_pipe->beginFrame();
     Systems::Render(registry(), *m_litShader, window());
-    pipe->endFrame();
-
+    m_pipe->endFrame();
     updateHUD(dt,w,h);
 }
 
 void Demo::updateHUD(float dt, int w, int h) {
     kGUI::BeginFrame();
     std::ostringstream ss;
-    ss << std::fixed << std::setprecision(1) << (dt>0?1.0f/dt:0.0f) << " fps • "
-       << w << "x" << h << " • ents " << scene().alive();
-
-    const PostProcessSettings* pp = nullptr;
-    if (auto v = registry().view<PostProcessSettings>(); !v.empty())
-        pp = &registry().get<PostProcessSettings>(v[0]);
-    if (pp) ss << " • exp " << std::setprecision(2) << pp->exposure
-               << (pp->bloom?" bloom":"") << (pp->fxaa?" fxaa":"");
-
-    kGUI::Text(float(w)-360.f, 18.f, 0.62f, ss.str(), {0.92f,0.94f,1.0f,1});
-    kGUI::Text(float(w)-360.f, 40.f, 0.44f,
-        "batching ON • aniso 8x • mipmaps • GL 4.6", {0.72f,0.78f,0.86f,1});
-    kGUI::Panel(float(w)-370.f, float(h)-34.f, 358, 26, {0,0,0,0.45f});
-    kGUI::Text(float(w)-362.f, float(h)-27.f, 0.50f,
-        "cjoka demo — всё движком ✓", {1,1,1,0.92f});
+    ss << std::fixed << std::setprecision(1) << (dt>0?1/dt:0.f) << " fps • ents " << scene().alive()
+       << " • bodies " << m_debris.size();
+    kGUI::Text(float(w)-340.f, 18.f, 0.62f, ss.str(), {0.92f,0.94f,1,1});
+    kGUI::Text(float(w)-340.f, 40.f, 0.44f,
+        m_onGround ? "ground: yes" : "ground: no", {0.72f,0.78f,0.86f,1});
+    kGUI::Panel(float(w)-350.f, float(h)-34.f, 338,26,{0,0,0,0.45f});
+    kGUI::Text(float(w)-342.f, float(h)-27.f, 0.5f, "PhysX 5.5 работает ✓", {1,1,1,0.92f});
     kGUI::EndFrame();
 }
 
-void Demo::onShutdown() { std::cout << "[Demo] shutdown clean\n"; }
+void Demo::onShutdown() {
+    if (m_cct) { m_phys->RemoveCharacter(m_cct); m_cct=nullptr; }
+    m_phys.reset();
+    cjoka_phys::Global::Shutdown();
+    std::cout << "[Demo] shutdown clean\n";
+}

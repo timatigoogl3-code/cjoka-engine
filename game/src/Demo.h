@@ -1,9 +1,9 @@
 #pragma once
 #include "engine/Engine.h"
+#include "engine/Physics/Physics.h"
 #include <memory>
 
-// Демка возможностей движка cjoka.
-// Всё в одном файле — смотри Game.cpp: OBJ, текстуры, свет, HDR, bloom, FXAA, batching, kGUI.
+// Демка cjoka: рендер + PhysX 5.5 (классика: гравитация, динамика, Character Controller).
 class Demo : public Application {
 public:
     Demo();
@@ -13,19 +13,25 @@ protected:
     void onUpdate(float dt) override;
     void onShutdown() override;
 private:
-    void setupAtmosphere();
-    void setupLights();
-    void setupShowcase();
+    void setupWorld();
+    void setupPlayer();
     void setupGUI();
+    void handlePlayerInput(float dt);
     void updateHUD(float dt, int w, int h);
 
     std::unique_ptr<Shader> m_litShader;
     Entity m_camera = NullEntity;
+    std::unique_ptr<cjoka_phys::World> m_phys;
 
-    // витрина
-    Entity m_plant = NullEntity;          // тяжёлая модель 137k verts
-    Entity m_metalSphere = NullEntity;    // блестящий материал
-    Entity m_emissiveOrb = NullEntity;    // светящийся шар (bloom)
-    std::vector<Entity> m_batchRow;       // инстансинг-ряд
-    float m_time = 0.0f;
+    // игрок (CCT)
+    void* m_cct = nullptr;
+    glm::vec3 m_playerPos{0, 1.0f, 4};
+    glm::vec3 m_playerVel{0};
+    bool m_onGround = false;
+    float m_yaw = -90.f;
+
+    // спавн кубиков по клавише
+    std::vector<Entity> m_debris;
+    std::unique_ptr<RenderPipeline> m_pipe;
+    int m_spawned = 0;
 };

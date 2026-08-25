@@ -8,11 +8,16 @@
 #include "engine/Renderer/Shader.h"
 #include "engine/Renderer/DefaultShaders.h"
 #include "engine/Renderer/Batcher.h"
+#include "engine/Renderer/ShadowMap.h"
 #include "engine/Core/Window.h"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
+
+// Глобальная карта теней (одна на кадр — направленный свет)
+inline ShadowMap& GlobalShadow() { static ShadowMap s; return s; }
 
 namespace Systems {
 
@@ -43,7 +48,7 @@ inline void RenderUnlit(Registry& reg, const Shader& shader, const glm::mat4& vi
 // ------------------------------------------------------------------
 // Lit — Blinn-Phong + Fog + HDR (красивый)
 // ------------------------------------------------------------------
-inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos) {
+inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, ShadowMap* shadow = nullptr) {
     shader.use();
     shader.setMat4("uView", view);
     shader.setMat4("uProj", proj);
@@ -93,6 +98,13 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
     shader.setVec3("uFogColor", fogCol);
     shader.setFloat("uFogDensity", fogDen);
     shader.setFloat("uExposure", exposure);
+    // тени
+    shader.setBool("uHasShadow", shadow && shadow->ready());
+    if (shadow && shadow->ready()) {
+        shader.setMat4("uLightMatrix", shadow->matrix());
+        shader.setInt("uShadowMap", 2);
+        shadow->Bind(2);
+    }
 
     for (Entity e : reg.view<Transform, MeshRenderer>()) {
         auto& tr = reg.get<Transform>(e);
@@ -149,6 +161,38 @@ inline void DrawSky(const glm::mat4& view, const glm::mat4& proj, const Sky* sky
 }
 
 // ------------------------------------------------------------------
+// Shadow pass — глубина сцены с точки солнца
+// ------------------------------------------------------------------
+inline void RenderShadowPass(Registry& reg, const glm::mat4& lightMatrix) {
+    static Shader* sh = nullptr;
+    if (!sh) sh = new Shader(DefaultShaders::kShadowDepthVS, DefaultShaders::kShadowDepthFS);
+    sh->use();
+    sh->setMat4("uLightMatrix", lightMatrix);
+    for (Entity e : reg.view<Transform, MeshRenderer>()) {
+        auto& mr = reg.get<MeshRenderer>(e);
+        if (!mr.visible || !mr.mesh || mr.mesh->empty()) continue;
+        if (reg.get<Transform>(e).scale.x <= 0.f) continue;
+        // большие статические объекты тоже отбрасывают — castShadow по умолчанию true
+        sh->setMat4("uModel", reg.get<Transform>(e).matrix());
+        // uLightMatrix уже содержит view*proj; модель отдельно
+        // но шейдер один uniform — домножим на CPU: передадим LM*model
+        sh->setMat4("uLightMatrix", lightMatrix * reg.get<Transform>(e).matrix());
+        mr.mesh->draw();
+    }
+}
+
+inline glm::mat4 SunLightMatrix(const glm::vec3& camPos, const DirectionalLight& sun) {
+    glm::vec3 dir = glm::normalize(sun.direction); // к свету -> вниз; позиция света = -dir
+    glm::vec3 center = camPos + glm::vec3(0,0,0) - dir * 10.0f; // чуть вперёд по взгляду не знаем — центр у камеры
+    center = camPos;
+    glm::vec3 eye = center + (-dir) * 40.0f;   // свет сверху против направления
+    glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0,1,0));
+    float r = 30.0f;
+    glm::mat4 proj = glm::ortho(-r,r,-r,r, 1.0f, 90.0f);
+    return proj * view;
+}
+
+// ------------------------------------------------------------------
 // High-level Render — находит камеру, рисует sky + meshes (с батчингом если выгодно)
 // ------------------------------------------------------------------
 inline void Render(Registry& reg, const Shader& shader, const Window& window) {
@@ -163,21 +207,32 @@ inline void Render(Registry& reg, const Shader& shader, const Window& window) {
     if (!reg.view<Sky>().empty()) skyPtr=&reg.get<Sky>(reg.view<Sky>()[0]);
     if (cam!=NullEntity) { auto& c=reg.get<Camera>(cam); auto& t=reg.get<Transform>(cam); view=Camera::viewFromTransform(t); proj=c.projection(aspect); viewPos=t.position; }
 
+    // --- SHADOW PASS ---
+    bool shadowOn=false;
+    glm::mat4 lightMat(1);
+    if (auto v = reg.view<DirectionalLight>(); !v.empty()) {
+        auto& sun = reg.get<DirectionalLight>(v[0]);
+        lightMat = SunLightMatrix(viewPos, sun);
+        GlobalShadow().Begin(lightMat);
+        RenderShadowPass(reg, lightMat);
+        GlobalShadow().End(w,h);
+        shadowOn=true;
+    }
+
     DrawSky(view, proj, skyPtr);
 
     // Динамический батчинг: если много одинаковых мешей — инстансим
     auto viewTrMesh = reg.view<Transform, MeshRenderer>();
     if (viewTrMesh.size() > 6) {
-        // пробуем батчинг
         Batcher batcher; batcher.begin();
         for (Entity e : viewTrMesh) batcher.submit(reg.get<Transform>(e), reg.get<MeshRenderer>(e));
         if (batcher.batchCount() < viewTrMesh.size() / 2) {
-            batcher.flush(reg, view, proj, viewPos);
+            batcher.flush(reg, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr);
             return;
         }
     }
     bool hasLight = reg.count<DirectionalLight>()>0 || reg.count<PointLight>()>0;
-    if (hasLight) RenderLit(reg, shader, view, proj, viewPos);
+    if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr);
     else RenderUnlit(reg, shader, view, proj, viewPos);
 }
 

@@ -20,9 +20,28 @@ add_library(cjoka_engine STATIC
     src/Renderer/RenderPipeline.cpp
     src/Renderer/Batcher.cpp
     src/Renderer/Skybox.cpp
+    src/Renderer/ShadowMap.cpp
     src/Assets/AssetManager.cpp
     src/GUI/Font.cpp
     src/GUI/kGUI.cpp
+    src/Physics/Physics.cpp
+)
+
+# ---- PhysX 5.5 (prebuilt static) ----
+set(PHYSX5_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/physx5)
+add_library(physx5 INTERFACE)
+target_include_directories(physx5 INTERFACE ${PHYSX5_DIR}/include)
+target_link_directories(physx5 INTERFACE ${PHYSX5_DIR}/lib)
+target_link_libraries(physx5 INTERFACE
+    -Wl,--start-group
+    PhysX_static_64
+    PhysXCommon_static_64
+    PhysXFoundation_static_64
+    PhysXExtensions_static_64
+    PhysXCooking_static_64
+    PhysXCharacterKinematic_static_64
+    PhysXPvdSDK_static_64
+    -Wl,--end-group
 )
 
 target_include_directories(cjoka_engine PUBLIC
@@ -36,6 +55,7 @@ find_package(glfw3 3.3 REQUIRED)
 
 target_link_libraries(cjoka_engine PUBLIC
     glad
+    physx5
     OpenGL::GL
     glfw
     dl

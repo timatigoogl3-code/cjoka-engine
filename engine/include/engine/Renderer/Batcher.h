@@ -1,6 +1,7 @@
 #pragma once
 #include "engine/Renderer/Mesh3D.h"
 #include "engine/ECS/Components.h"
+#include "engine/Renderer/ShadowMap.h"
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -15,7 +16,7 @@ public:
     void begin();
     void submit(const Transform& tr, const MeshRenderer& mr);
     // flush сам находит свет/туман/скай из Registry и рисует instanced
-    void flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
+        void flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, ShadowMap* shadow = nullptr);
 
     size_t batchCount() const { return m_batches.size(); }
     size_t totalInstances() const;

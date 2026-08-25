@@ -17,6 +17,16 @@ uniform sampler2D uDiffuseMap; uniform bool uUseDiffuseMap;
 void main(){ vec3 c=vColor; if(uUseDiffuseMap) c*=texture(uDiffuseMap,vUV).rgb; FragColor=vec4(c,1.0); }
 )";
 
+// Shadow depth pass — рисуем только глубину с точки света
+inline const char* kShadowDepthVS = R"(#version 460 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uLightMatrix;
+void main(){ gl_Position = uLightMatrix * vec4(aPos,1.0); }
+)";
+inline const char* kShadowDepthFS = R"(#version 460 core
+void main(){}
+)";
+
 // Lit — красивый Blinn-Phong + Fresnel + Rim + Fog + Gamma + Tonemapping
 inline const char* kLitVS = R"(#version 460 core
 layout(location=0) in vec3 aPos;
@@ -48,6 +58,23 @@ uniform sampler2D uSpecularMap; uniform bool uUseSpecularMap;
 // beauty
 uniform vec3 uFogColor; uniform float uFogDensity; uniform float uExposure;
 uniform float uTime;
+// shadows
+uniform mat4 uLightMatrix; uniform sampler2D uShadowMap; uniform bool uHasShadow;
+
+float shadowFactor(vec3 worldPos, vec3 N, vec3 L){
+    if(!uHasShadow) return 1.0;
+    vec4 lp = uLightMatrix * vec4(worldPos,1.0);
+    vec3 proj = lp.xyz/lp.w * 0.5 + 0.5;
+    if(proj.z>1.0 || proj.x<0.0||proj.x>1.0||proj.y<0.0||proj.y>1.0) return 1.0;
+    float bias = max(0.0015*(1.0-dot(N,L)), 0.0008);
+    float s=0.0;
+    vec2 texel = 1.0/vec2(textureSize(uShadowMap,0));
+    for(int dx=-1;dx<=1;++dx) for(int dy=-1;dy<=1;++dy){
+        float d=texture(uShadowMap, proj.xy+vec2(dx,dy)*texel*1.2).r;
+        s += (proj.z-bias > d) ? 0.0 : 1.0;
+    }
+    return s/9.0;
+}
 
 vec3 aces(vec3 x){ float a=2.51,b=0.03,c=2.43,d=0.59,e=0.14; return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0); }
 
@@ -73,7 +100,8 @@ void main(){
         float fresnel=pow(1.0-max(dot(N,V),0.0), 2.0)*0.25;
         // rim
         float rim=pow(1.0-max(dot(N,V),0.0), 3.0)*0.15 * diff;
-        vec3 dirContrib = uDirLight.color*uDirLight.intensity*(diff*albedo*0.9 + spec*specMask*vec3(0.7) + fresnel*vec3(0.3) + rim*albedo);
+        float sh=shadowFactor(vWorldPos,N,L);
+        vec3 dirContrib = uDirLight.color*uDirLight.intensity*sh*(diff*albedo*0.9 + spec*specMask*vec3(0.7)*sh + rim*albedo + fresnel*vec3(0.3));
         result += dirContrib;
     }
     // Point lights — Blinn
@@ -145,6 +173,22 @@ uniform PointLight uPointLights[MAX_POINT_LIGHTS]; uniform int uPointLightCount;
 uniform sampler2D uDiffuseMap; uniform bool uUseDiffuseMap;
 uniform sampler2D uSpecularMap; uniform bool uUseSpecularMap;
 uniform vec3 uFogColor; uniform float uFogDensity; uniform float uExposure; uniform float uTime;
+uniform mat4 uLightMatrix; uniform sampler2D uShadowMap; uniform bool uHasShadow;
+
+float shadowFactorI(vec3 worldPos, vec3 N, vec3 L){
+    if(!uHasShadow) return 1.0;
+    vec4 lp = uLightMatrix * vec4(worldPos,1.0);
+    vec3 proj = lp.xyz/lp.w * 0.5 + 0.5;
+    if(proj.z>1.0 || proj.x<0.0||proj.x>1.0||proj.y<0.0||proj.y>1.0) return 1.0;
+    float bias = max(0.0015*(1.0-dot(N,L)), 0.0008);
+    float s=0.0;
+    vec2 texel = 1.0/vec2(textureSize(uShadowMap,0));
+    for(int dx=-1;dx<=1;++dx) for(int dy=-1;dy<=1;++dy){
+        float d=texture(uShadowMap, proj.xy+vec2(dx,dy)*texel*1.2).r;
+        s += (proj.z-bias > d) ? 0.0 : 1.0;
+    }
+    return s/9.0;
+}
 vec3 aces(vec3 x){ float a=2.51,b=0.03,c=2.43,d=0.59,e=0.14; return clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0,1.0); }
 void main(){
     vec3 N=normalize(vNormal); vec3 V=normalize(uViewPos - vWorldPos);
@@ -158,7 +202,8 @@ void main(){
         float specMask=uUseSpecularMap?texture(uSpecularMap,vUV).r:1.0;
         float fresnel=pow(1.0-max(dot(N,V),0.0),2.0)*0.25;
         float rim=pow(1.0-max(dot(N,V),0.0),3.0)*0.15*diff;
-        result+=uDirLight.color*uDirLight.intensity*(diff*albedo*0.9 + spec*specMask*vec3(0.7) + fresnel*vec3(0.3) + rim*albedo);
+        float sh=shadowFactorI(vWorldPos,N,L);
+        result+=uDirLight.color*uDirLight.intensity*sh*(diff*albedo*0.9 + spec*specMask*vec3(0.7)*sh + rim*albedo + fresnel*vec3(0.3));
     }
     for(int i=0;i<uPointLightCount && i<MAX_POINT_LIGHTS;++i){
         PointLight pl=uPointLights[i]; vec3 L=pl.position-vWorldPos; float dist=length(L); if(dist>pl.range) continue;
