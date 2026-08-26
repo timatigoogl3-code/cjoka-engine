@@ -43,6 +43,8 @@ public:
     // Вызывать после Systems::Render(...)
     void endFrame();
 
+    void setCameraMatrices(const glm::mat4& view, const glm::mat4& proj);
+
     Framebuffer& hdrFBO() { return m_hdr; }
     GLuint hdrTexture() const { return m_hdr.colorTexture(); }
 
@@ -55,5 +57,10 @@ private:
     Framebuffer m_bloomExtract; // half res
     Framebuffer m_bloomPing;    // half res
     Framebuffer m_bloomPong;    // half res
-    Framebuffer m_composite;    // full res (для FXAA)
+    Framebuffer m_composite;    // full res (для FXAA/TAA)
+    Framebuffer m_taaHistory[2];
+    int m_taaIndex = 0;
+    glm::mat4 m_currentViewProj{1.0f};
+    glm::mat4 m_prevViewProj{1.0f};
+    int m_frameIndex = 0;
 };

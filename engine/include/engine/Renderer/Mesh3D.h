@@ -32,6 +32,9 @@ public:
     Mesh3D(Mesh3D&& other) noexcept;
     Mesh3D& operator=(Mesh3D&& other) noexcept;
 
+    glm::vec3 minExtents() const { return m_minExtents; }
+    glm::vec3 maxExtents() const { return m_maxExtents; }
+
     void draw() const;
     // инстансинг — один draw на N объектов
     void drawInstanced(const InstanceData* data, size_t count) const;
@@ -40,6 +43,9 @@ public:
     uint32_t indexCount() const { return m_indexCount; }
     bool empty() const { return m_indexCount == 0; }
     GLuint vao() const { return m_vao; }
+    // доступ к CPU-копии (для ClusteredMesh/Nanite-lite)
+    const std::vector<Vertex>& vertices() const { return m_vertices; }
+    const std::vector<uint32_t>& indices() const { return m_indices; }
 
     static Mesh3D Triangle(glm::vec3 c0={1,0.2f,0.2f}, glm::vec3 c1={0.2f,1,0.2f}, glm::vec3 c2={0.2f,0.2f,1});
     static Mesh3D Quad(float size = 1.0f);
@@ -53,4 +59,6 @@ private:
     GLuint m_vao = 0, m_vbo = 0, m_ebo = 0;
     mutable GLuint m_instanceVBO = 0;
     uint32_t m_indexCount = 0;
+    glm::vec3 m_minExtents{0.0f};
+    glm::vec3 m_maxExtents{0.0f};
 };

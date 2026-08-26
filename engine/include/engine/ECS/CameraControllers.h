@@ -19,7 +19,7 @@ namespace Cam {
 inline Entity PrimaryCam(Registry& reg) {
     for (Entity e : reg.view<Camera, Transform>()) if (reg.get<Camera>(e).primary) return e;
     auto v = reg.view<Camera, Transform>();
-    return v.empty() ? NullEntity : v[0];
+    return (v.begin() == v.end()) ? NullEntity : *v.begin();
 }
 inline glm::vec3 Front(const Transform& t) {
     float yaw = glm::radians(t.rotation.y), pitch = glm::radians(t.rotation.x);
@@ -35,8 +35,9 @@ inline void Orbit(Registry& reg, Window& win, float dt, glm::vec3 target, float 
     if (win.isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT) || win.isMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT)) {
         double x,y; win.getCursorPos(x,y);
         if (!dragging) { dragging=true; lx=x; ly=y; }
-        yaw   += float(x-lx)*0.25f;
-        pitch += float(y-ly)*0.25f;
+        float sens = (speed / 40.0f) * 0.25f;
+        yaw   += static_cast<float>(x-lx) * sens;
+        pitch += static_cast<float>(y-ly) * sens;
         pitch = glm::clamp(pitch, -85.0f, 85.0f);
         lx=x; ly=y;
     } else dragging=false;

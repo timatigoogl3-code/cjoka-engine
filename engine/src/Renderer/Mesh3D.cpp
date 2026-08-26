@@ -1,4 +1,5 @@
 #include "engine/Renderer/Mesh3D.h"
+#include <limits>
 
 Mesh3D::Mesh3D(std::vector<Vertex> vertices, std::vector<uint32_t> indices)
     : m_vertices(std::move(vertices)), m_indices(std::move(indices)) { setup(); }
@@ -11,7 +12,8 @@ Mesh3D::~Mesh3D() {
 }
 Mesh3D::Mesh3D(Mesh3D&& o) noexcept
     : m_vertices(std::move(o.m_vertices)), m_indices(std::move(o.m_indices)),
-      m_vao(o.m_vao), m_vbo(o.m_vbo), m_ebo(o.m_ebo), m_instanceVBO(o.m_instanceVBO), m_indexCount(o.m_indexCount) {
+      m_vao(o.m_vao), m_vbo(o.m_vbo), m_ebo(o.m_ebo), m_instanceVBO(o.m_instanceVBO), m_indexCount(o.m_indexCount),
+      m_minExtents(o.m_minExtents), m_maxExtents(o.m_maxExtents) {
     o.m_vao = o.m_vbo = o.m_ebo = o.m_instanceVBO = 0; o.m_indexCount = 0;
 }
 Mesh3D& Mesh3D::operator=(Mesh3D&& o) noexcept {
@@ -24,6 +26,8 @@ Mesh3D& Mesh3D::operator=(Mesh3D&& o) noexcept {
         m_indices  = std::move(o.m_indices);
         m_vao = o.m_vao; m_vbo = o.m_vbo; m_ebo = o.m_ebo; m_instanceVBO = o.m_instanceVBO;
         m_indexCount = o.m_indexCount;
+        m_minExtents = o.m_minExtents;
+        m_maxExtents = o.m_maxExtents;
         o.m_vao = o.m_vbo = o.m_ebo = o.m_instanceVBO = 0; o.m_indexCount = 0;
     }
     return *this;
@@ -51,6 +55,14 @@ void Mesh3D::setupInstancing() const {
 }
 void Mesh3D::setup() {
     if (m_vertices.empty() || m_indices.empty()) return;
+    
+    m_minExtents = glm::vec3(std::numeric_limits<float>::max());
+    m_maxExtents = glm::vec3(std::numeric_limits<float>::lowest());
+    for (const auto& v : m_vertices) {
+        m_minExtents = glm::min(m_minExtents, v.position);
+        m_maxExtents = glm::max(m_maxExtents, v.position);
+    }
+
     m_indexCount = static_cast<uint32_t>(m_indices.size());
     glGenVertexArrays(1, &m_vao);
     glGenBuffers(1, &m_vbo);

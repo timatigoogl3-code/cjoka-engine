@@ -6,6 +6,7 @@
 class Shader {
 public:
     Shader(const char* vertexSrc, const char* fragmentSrc);
+    Shader(const char* computeSrc);
     ~Shader();
 
     Shader(const Shader&) = delete;
@@ -24,6 +25,7 @@ public:
     void setVec4(const char* name, glm::vec4 v) const;
     void setMat3(const char* name, const glm::mat3& m) const;
     void setMat4(const char* name, const glm::mat4& m) const;
+    void setMat4Array(const char* name, const glm::mat4* values, int count) const;
 
     static Shader FromFiles(const char* vertPath, const char* fragPath);
 

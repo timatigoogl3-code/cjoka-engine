@@ -9,10 +9,13 @@
 //   auto tex = Assets::Texture("assets/textures/checker.png");
 //   auto mesh = Assets::Mesh("assets/models/cube.obj");
 //   auto plant = Assets::Texture("assets/textures/indoor_plant_COL.jpg");
+namespace Animation { class SkinnedMesh; }
+
 namespace Assets {
 
 std::shared_ptr<Texture> Texture(const std::string& path, bool srgb = false);
 std::shared_ptr<Mesh3D> Mesh(const std::string& path);
+std::shared_ptr<Animation::SkinnedMesh> Skinned(const std::string& path);
 std::shared_ptr<Mesh3D> Cube(float size = 1.0f);
 std::shared_ptr<Mesh3D> Quad(float size = 1.0f);
 std::shared_ptr<Mesh3D> Sphere(float r = 0.5f, int seg = 32, int rings = 16);
@@ -23,7 +26,5 @@ bool HotReloadEnabled();
 size_t CacheSize(); // сколько в кэше
 void Stats(); // лог
 
-// Удобства: прелоад горшка одной строкой
-inline void PreloadIndoorPlant() { Texture("assets/textures/indoor_plant_COL.jpg"); Mesh("assets/models/indoor_plant.obj"); }
-
 } // namespace Assets
+

@@ -1,57 +1,116 @@
 #pragma once
-// Scene — high-level обёртка над Registry с удобными хелперами для разраба
-// Пример: scene.createCube({{0,1,0}}, Material{}, "Cube");
+// Scene — универсальный контейнер сцены и ECS-оркестратор
 #include "engine/ECS/Registry.h"
 #include "engine/ECS/Components.h"
+#include "engine/Physics/Physics.h"
 #include "engine/Assets/AssetManager.h"
 #include <string>
+#include <vector>
 
+class Scene;
+
+// ---------- EntityRef — объектно-ориентированный Handle для Entity ----------
+class EntityRef {
+public:
+    EntityRef() = default;
+    EntityRef(Entity e, Scene* sc) : m_e(e), m_scene(sc) {}
+
+    Entity id() const { return m_e; }
+    operator Entity() const { return m_e; }
+    bool operator==(const EntityRef& o) const { return m_e == o.m_e; }
+    bool operator!=(const EntityRef& o) const { return m_e != o.m_e; }
+    explicit operator bool() const { return valid(); }
+
+    bool valid() const;
+    void destroy();
+
+    template<typename T, typename... Args>
+    T& add(Args&&... args);
+
+    template<typename T>
+    T& get();
+
+    template<typename T>
+    const T& get() const;
+
+    template<typename T>
+    T* try_get();
+
+    template<typename T>
+    const T* try_get() const;
+
+    template<typename T>
+    bool has() const;
+
+    template<typename T>
+    void remove();
+
+    Transform& transform();
+    const Transform& transform() const;
+    MeshRenderer& renderer();
+    const MeshRenderer& renderer() const;
+    std::string name() const;
+
+private:
+    Entity m_e = NullEntity;
+    Scene* m_scene = nullptr;
+};
+
+// ---------- Scene ----------
 class Scene {
+private:
+    Registry m_registry;
+
 public:
     Scene() = default;
 
     Registry& registry() { return m_registry; }
     const Registry& registry() const { return m_registry; }
 
-    // Базовое создание
-    Entity create(const std::string& name = "") {
+    EntityRef get(Entity e) { return EntityRef(e, this); }
+
+    // Универсальное создание сущностей
+    EntityRef create(const std::string& name = "") {
         Entity e = m_registry.create();
         if (!name.empty()) m_registry.emplace<Name>(e, Name{name});
-        return e;
-    }
-    Entity create(const std::string& name, const Transform& t) {
-        Entity e = create(name);
-        m_registry.emplace<Transform>(e, t);
-        return e;
+        return EntityRef(e, this);
     }
 
-    // --- Хелперы для разраба (один вызов вместо 3) ---
-    Entity createCube(const Transform& t, const Material& mat = {}, const std::string& name = "Cube") {
-        Entity e = create(name, t);
-        m_registry.emplace<MeshRenderer>(e, MeshRenderer{Assets::Cube(1.0f), mat});
-        return e;
-    }
-    Entity createCube(const std::string& name, const Transform& t, const Material& mat = {}) { return createCube(t, mat, name); }
-
-    Entity createSphere(const Transform& t, const Material& mat = {}, float r = 0.5f, const std::string& name = "Sphere") {
-        Entity e = create(name, t);
-        m_registry.emplace<MeshRenderer>(e, MeshRenderer{Assets::Sphere(r), mat});
-        return e;
+    EntityRef create(const std::string& name, const Transform& t) {
+        EntityRef ref = create(name);
+        m_registry.emplace<Transform>(ref.id(), t);
+        return ref;
     }
 
-    Entity createQuad(const Transform& t, const Material& mat = {}, float size = 1.0f, const std::string& name = "Quad") {
-        Entity e = create(name, t);
-        m_registry.emplace<MeshRenderer>(e, MeshRenderer{Assets::Quad(size), mat});
-        return e;
+    // Универсальные базовые примитивы
+    EntityRef createCube(const Transform& t, const Material& mat = {}, const std::string& name = "Cube") {
+        EntityRef ref = create(name, t);
+        ref.add<MeshRenderer>(MeshRenderer(Assets::Cube(1.0f), mat).setClusterLOD(false));
+        return ref;
+    }
+    EntityRef createCube(const std::string& name, const Transform& t, const Material& mat = {}) {
+        return createCube(t, mat, name);
     }
 
-    Entity createModel(const std::string& objPath, const Transform& t, const Material& mat = {}, const std::string& name = "") {
-        Entity e = create(name.empty() ? objPath : name, t);
-        m_registry.emplace<MeshRenderer>(e, MeshRenderer{Assets::Mesh(objPath), mat});
-        return e;
+    EntityRef createSphere(const Transform& t, const Material& mat = {}, float r = 0.5f, const std::string& name = "Sphere") {
+        EntityRef ref = create(name, t);
+        ref.add<MeshRenderer>(MeshRenderer(Assets::Sphere(r), mat).setClusterLOD(false));
+        return ref;
     }
-    // Текстурированная модель одной строкой — самый частый кейс
-    Entity createTexturedModel(const std::string& objPath, const std::string& texPath, const Transform& t, const Material& extra = {}, const std::string& name = "") {
+
+    EntityRef createQuad(const Transform& t, const Material& mat = {}, float size = 1.0f, const std::string& name = "Quad") {
+        EntityRef ref = create(name, t);
+        ref.add<MeshRenderer>(MeshRenderer(Assets::Quad(size), mat).setClusterLOD(false));
+        return ref;
+    }
+
+    EntityRef createModel(const std::string& objPath, const Transform& t, const Material& mat = {}, const std::string& name = "") {
+        EntityRef ref = create(name.empty() ? objPath : name, t);
+        ref.add<MeshRenderer>(MeshRenderer(Assets::Mesh(objPath), mat));
+        return ref;
+    }
+
+    EntityRef createTexturedModel(const std::string& objPath, const std::string& texPath, const Transform& t, const Material& extra = {}, const std::string& name = "") {
         Material m = extra;
         if (!texPath.empty()) {
             m.diffuseMap = Assets::Texture(texPath, true);
@@ -59,82 +118,69 @@ public:
         }
         return createModel(objPath, t, m, name);
     }
-    // Горшок — стресс тест: 25k verts / 22k tris, COL текстура 635KB (ранее bbox 8x9 → scale 0.18 ~1.5м)
-    Entity createIndoorPlant(const Transform& t, const std::string& name = "Plant") {
-        Material m; m.albedo = glm::vec3(1.0f); m.shininess = 48.0f;
-        m.diffuseMap = Assets::Texture("assets/textures/indoor_plant_COL.jpg", true);
-        m.useDiffuseMap = m.diffuseMap && m.diffuseMap->valid();
-        return createModel("assets/models/indoor_plant.obj", t, m, name);
-    }
-    // Универсальный 1-строчный спавн любой модели+текстуры (без хардкода — просто путь)
-    Entity spawn(const std::string& modelPath, const std::string& texPath, const Transform& t, const std::string& name = "") {
-        return createTexturedModel(modelPath, texPath, t, {}, name.empty()?modelPath:name);
-    }
-    // Быстро накидать много одинаковых — для теста батчинга/инстансинга
-    std::vector<Entity> createGrid(const std::string& objPath, const std::string& texPath, glm::vec3 origin, int rows, int cols, float spacing, glm::vec3 scale = {1,1,1}, const std::string& baseName = "GridObj") {
-        std::vector<Entity> out; out.reserve(static_cast<size_t>(rows*cols));
-        auto mesh = Assets::Mesh(objPath);
-        auto tex = texPath.empty() ? nullptr : Assets::Texture(texPath);
-        for (int r=0;r<rows;++r) for(int c=0;c<cols;++c){
-            Transform tr{{origin.x + c*spacing, origin.y, origin.z + r*spacing}, {}, scale};
-            Material m; if(tex){ m.diffuseMap=tex; m.useDiffuseMap=true; }
-            Entity e = create(baseName+"_"+std::to_string(r)+"_"+std::to_string(c), tr);
-            m_registry.emplace<MeshRenderer>(e, MeshRenderer{mesh, m});
-            out.push_back(e);
+
+    EntityRef createClusteredModel(const std::string& objPath, const std::string& texPath, const Transform& t, const Material& extra = {}, const std::string& name = "") {
+        Material m = extra;
+        if (!texPath.empty()) {
+            m.diffuseMap = Assets::Texture(texPath, true);
+            m.useDiffuseMap = m.diffuseMap && m.diffuseMap->valid();
         }
-        return out;
-    }
-    // Дублировать существующий объект со смещением
-    Entity duplicate(Entity src, glm::vec3 offset, const std::string& newName = "") {
-        if (!m_registry.valid(src)) return NullEntity;
-        Entity e = m_registry.create();
-        if (m_registry.has<Transform>(src)) {
-            Transform t = m_registry.get<Transform>(src);
-            t.position += offset;
-            m_registry.emplace<Transform>(e, t);
-        }
-        if (m_registry.has<MeshRenderer>(src)) m_registry.emplace<MeshRenderer>(e, m_registry.get<MeshRenderer>(src));
-        if (!newName.empty()) m_registry.emplace<Name>(e, Name{newName});
-        else if (m_registry.has<Name>(src)) m_registry.emplace<Name>(e, m_registry.get<Name>(src));
-        return e;
+        auto cm = Assets::Clustered(objPath);
+        EntityRef ref = create(name.empty() ? objPath : name, t);
+        ref.add<MeshRenderer>(MeshRenderer(cm, m));
+        return ref;
     }
 
-    Entity createPointLight(const Transform& t, const PointLight& pl = {}, const std::string& name = "PointLight") {
-        Entity e = create(name, t);
-        m_registry.emplace<PointLight>(e, pl);
-        return e;
+    // Декали (проекционные и плоские)
+    EntityRef createDecal(const Transform& t, const std::shared_ptr<Texture>& tex, const glm::vec3& size = {1.0f, 0.5f, 1.0f}, const glm::vec4& tint = {1.0f, 1.0f, 1.0f, 1.0f}, const std::string& name = "Decal") {
+        EntityRef ref = create(name, t);
+        ref.add<Decal>(Decal::Create(tex, size, tint));
+        return ref;
     }
-    Entity createDirectionalLight(const glm::vec3& dir, const glm::vec3& color = {1,1,1}, float intensity = 1.0f, const std::string& name = "DirLight") {
-        Entity e = create(name);
-        m_registry.emplace<DirectionalLight>(e, DirectionalLight{dir, color, intensity});
-        return e;
+
+    // Освещение, камера и окружение
+    EntityRef createPointLight(const Transform& t, const PointLight& light, const std::string& name = "PointLight") {
+        EntityRef ref = create(name, t);
+        ref.add<PointLight>(light);
+        return ref;
     }
-    Entity createCamera(const Transform& t, const Camera& cam = {}, const std::string& name = "Camera") {
-        Entity e = create(name, t);
-        m_registry.emplace<Camera>(e, cam);
-        setPrimaryCamera(e);
-        return e;
+
+    EntityRef createSun(const glm::vec3& dir = {-0.5f, -1.0f, -0.3f}, const glm::vec3& color = {1.0f, 0.95f, 0.85f}, float intensity = 1.2f, const std::string& name = "Sun") {
+        EntityRef ref = create(name);
+        ref.add<DirectionalLight>(DirectionalLight{dir, color, intensity});
+        return ref;
     }
-    // Красота одной строкой
-    Entity createPost(const PostProcessSettings& s = PostProcessSettings::Cinematic(), const std::string& name = "Post") {
-        Entity e = create(name);
-        m_registry.emplace<PostProcessSettings>(e, s);
-        return e;
+
+    EntityRef createCamera(const Transform& t, const Camera& cam = {}, const std::string& name = "Camera") {
+        EntityRef ref = create(name, t);
+        ref.add<Camera>(cam);
+        return ref;
     }
-    Entity createBeautifulAtmosphere(const Sky& sky = {.top{0.18f,0.42f,0.88f}, .horizon{0.62f,0.76f,0.96f}, .bottom{0.90f,0.92f,0.96f}, .exposure=1.08f},
-                                     const Fog& fog = {.color{0.10f,0.12f,0.16f}, .density=0.014f}, const std::string& name="Atmosphere") {
-        (void)name;
-        registry().emplace<Sky>(create("Sky"), sky);
-        registry().emplace<Fog>(create("Fog"), fog);
+
+    EntityRef createSky(const Sky& sky = {}, const std::string& name = "Sky") {
+        EntityRef ref = create(name);
+        ref.add<Sky>(sky);
+        return ref;
+    }
+
+    EntityRef createPost(const PostProcessSettings& post = {}, const std::string& name = "PostProcess") {
+        EntityRef ref = create(name);
+        ref.add<PostProcessSettings>(post);
+        return ref;
+    }
+
+    EntityRef createBeautifulAtmosphere(const Sky& sky = Sky::Sunset(), const Fog& fog = Fog{{0.8f, 0.6f, 0.5f}, 0.015f}) {
+        createSky(sky, "Sky");
+        create("Fog").add<Fog>(fog);
         return findByName("Sky");
     }
 
     // Поиск
-    Entity findByName(const std::string& name) const {
+    EntityRef findByName(const std::string& name) const {
         for (Entity e : m_registry.view<Name>()) {
-            if (m_registry.get<Name>(e).value == name) return e;
+            if (m_registry.get<Name>(e).value == name) return EntityRef(e, const_cast<Scene*>(this));
         }
-        return NullEntity;
+        return EntityRef();
     }
 
     // Камера
@@ -143,7 +189,7 @@ public:
             if (m_registry.get<Camera>(e).primary) return e;
         }
         auto v = m_registry.view<Camera>();
-        return v.empty() ? NullEntity : v[0];
+        return (v.begin() == v.end()) ? NullEntity : *v.begin();
     }
     void setPrimaryCamera(Entity e) {
         for (Entity c : m_registry.view<Camera>()) m_registry.get<Camera>(c).primary = false;
@@ -153,7 +199,48 @@ public:
     void destroy(Entity e) { m_registry.destroy(e); }
     void clear() { m_registry.clear(); }
     size_t alive() const { return m_registry.aliveCount(); }
-
-private:
-    Registry m_registry;
 };
+
+// ---------- EntityRef inline реализации ----------
+inline bool EntityRef::valid() const {
+    return m_scene && m_scene->registry().valid(m_e);
+}
+inline void EntityRef::destroy() {
+    if (valid()) { m_scene->destroy(m_e); m_e = NullEntity; }
+}
+template<typename T, typename... Args>
+inline T& EntityRef::add(Args&&... args) {
+    return m_scene->registry().emplace_or_replace<T>(m_e, std::forward<Args>(args)...);
+}
+template<typename T>
+inline T& EntityRef::get() {
+    return m_scene->registry().get<T>(m_e);
+}
+template<typename T>
+inline const T& EntityRef::get() const {
+    return m_scene->registry().get<T>(m_e);
+}
+template<typename T>
+inline T* EntityRef::try_get() {
+    return m_scene->registry().try_get<T>(m_e);
+}
+template<typename T>
+inline const T* EntityRef::try_get() const {
+    return m_scene->registry().try_get<T>(m_e);
+}
+template<typename T>
+inline bool EntityRef::has() const {
+    return m_scene->registry().has<T>(m_e);
+}
+template<typename T>
+inline void EntityRef::remove() {
+    m_scene->registry().remove<T>(m_e);
+}
+inline Transform& EntityRef::transform() { return get<Transform>(); }
+inline const Transform& EntityRef::transform() const { return get<Transform>(); }
+inline MeshRenderer& EntityRef::renderer() { return get<MeshRenderer>(); }
+inline const MeshRenderer& EntityRef::renderer() const { return get<MeshRenderer>(); }
+inline std::string EntityRef::name() const {
+    if (has<Name>()) return get<Name>().value;
+    return "Entity_" + std::to_string(static_cast<uint32_t>(m_e));
+}

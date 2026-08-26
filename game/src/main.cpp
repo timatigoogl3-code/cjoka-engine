@@ -1,8 +1,15 @@
-#include "Demo.h"
+#include "SceneEditor.h"
 
-// Точка входа демки. Правишь только game/src/ — движок линкуется, не пересобирается.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+extern "C" const char* __asan_default_options() {
+    return "detect_leaks=0";
+}
+#endif
+#endif
+
 int main() {
-    Demo app;
+    SceneEditor app;
     app.run();
     return 0;
 }

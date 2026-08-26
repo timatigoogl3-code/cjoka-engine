@@ -2,6 +2,68 @@
 
 Формат: SemVer-подобные версии движка. Даты — 2026.
 
+## [0.41] — 2026-08-25 — FBX Skeletal Animation, Rigging & ClusterLOD
+
+### Skeletal Animation & FBX
+- **Поддержка формата FBX**:
+  - Быстрый импорт FBX моделей, полисеток, UV и нормалей через `ufbx`
+  - Загрузка ригов, иерархии костей и матриц обратной bind-pose (`inverse bind pose`)
+  - 4-костный скининг вершин с нормализацией весов (`SkinnedVertex`)
+  - Чтение и сэмплирование анимационных клипов / треков с `slerp` (вращение) и `lerp` (позиция, масштаб)
+- **Контроллер анимаций (`Animator`)**:
+  - `play(clipName, loop, blendTime)` — запуск клипа с плавным переходом (cross-fade)
+  - `pause()`, `resume()`, `stop()`, `reset()` — полный контроль проигрывания
+  - `setSpeed(speed)` — регулировка скорости и реверс анимации
+  - `setTime(time)` — произвольная перемотка
+- **Шейдеры скининга**:
+  - `kSkinnedLitVS` + `kSkinnedShadowVS` — поддержка до 128 костей за 1 вызов `setMat4Array`
+  - Полная поддержка PBR материалов, теней и карты освещения для персонажей
+- **Интеграция в Scene и Demo**:
+  - `scene().createSkinnedModel(fbxPath, texPath, transform, material)`
+  - Анимированный персонаж Натан (`rp_nathan_animated_003_walking.fbx`) в демке с управлением с клавиатуры: `1` (Play), `2` (Pause), `3` (Reset), `-`/`+` (Скорость)
+
+### ClusterLOD (ex-Nanite)
+- Все классы, пространства имён и логи переименованы в **`ClusterLOD`** / `ClusteredLOD` (во избежание проблем с товарными знаками)
+- Сохранены псевдонимы `namespace nanite = cluster_lod` для обратной совместимости
+
+## [0.40] — 2026-08-25 — Nanite-lite + GPU Instancing (5x-10x Boost) & DX 2.0
+
+### Developer Experience & API (DX)
+- **`EntityRef`** — высокоуровневый объектный handle над сущностями (`entity.transform()`, `entity.add<T>()`, `entity.destroy()`)
+- **PBR Пресеты материалов**: `Material::Default()`, `Material::Metal()`, `Material::Chrome()`, `Material::Gold()`, `Material::Dielectric()`, `Material::Plastic()`, `Material::Emissive()`, `Material::Textured()` + fluent builder (`withRoughness()`, `withMetallic()`, `withTexture()`)
+- **1-строчный спавн в Scene**: `createDynamicBox()`, `createStaticBox()`, `createDynamicSphere()`, `createNaniteModel()`, `createSun()`
+- **Transform хелперы**: `forward()`, `right()`, `up()`, `translate()`, `rotate()`
+- **Очистка кода**: устранены предупреждения компилятора (0 warnings в коде движка), убраны оверхеды и дублирование
+- **Физика**: полноценный `World::AddImpulse`, корректные размеры коллайдеров акторов, CCD для быстрых динамических тел
+
+### Engine (Performance)
+- **GPU Instancing для ClusteredMesh**:
+  - `DrawInstanced()` и `DrawInstancedShadow()` — группировка одинаковых мешей по LOD
+  - Вместо 100+ draw calls на сцену теперь всего ~4 вызова (`glDrawElementsInstanced`)
+  - Динамический `m_instanceVBO` с матрицами трансформаций (location 4..7)
+  - `kClusterInstancedVS` и `kShadowInstancedVS` для аппаратного инстансинга
+  - Рост производительности: **с 7–10 FPS до ~95-108 FPS в Release!**
+- **Оптимизация шейдеров и теней**:
+  - Early-out для сэмплинга теней на обратных гранях (`NoL <= 0`)
+  - 8-точечный Poisson disk для мягких теней (на 33% быстрее выборка)
+  - Distance culling объектов (>75м)
+- **Nanite-lite** — облегчённый аналог UE5 Nanite:
+  - Кластеризация по Morton-порядку (~128 трис/кластер)
+  - LOD-цепочка через vertex clustering (4 уровня), базовая ячейка = diag/512
+  - Ленточное правило выбора LOD по screen-space error: ровно один уровень на область
+  - Frustum culling объектов и кластеров (6-plane sphere test)
+  - Сварка с учётом октанта нормали — нет чёрных пятен на двусторонних поверхностях
+  - Блокировка граничных вершин между группами — нет щелей между LOD
+  - Debug-визуализация: TAB окрашивает по LOD (радуга), N вкл/выкл, `[ ]` live порог
+  - HUD: drawn/total кластеров, текущий порог
+- **Тени кэшируются** (`shadowEveryNFrames = 4`) — shadow map рисуется раз в N кадров
+- Автоматическая нанитизация `MeshRenderer` (ленивый `ClusteredFrom()`)
+- Кэш кластеров по .obj и по Mesh3D ptr
+
+### Demo
+- Стресс-тест: сетка 10×10 кустов (100 инстансов одного ClusteredMesh) за пределами платформы
+- Горшок `indoor_plant.obj` — ~46K трис L0, 4 уровня LOD
+
 ## [0.35] — 2026-08-25 — PBR + мягкие тени + CCD
 
 ### Engine
@@ -23,7 +85,6 @@
   коробки — GridBox_Default; уборка тел, упавших ниже y<-30
 - CCT толкает ящики плечом при ходьбе; F-бросок с начальной скоростью
 
-## [0.30] — 2026-08-25 — Тени + PhysX
 ## [0.30] — 2026-08-25 — Тени + PhysX
 
 ### Engine

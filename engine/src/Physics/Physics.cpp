@@ -7,12 +7,61 @@
 #include "PxPhysicsAPI.h"
 #include "characterkinematic/PxControllerManager.h"
 #include "characterkinematic/PxController.h"
-#include "PxPhysicsAPI.h"
 #include "cooking/PxCooking.h"
 
 using namespace physx;
 
 namespace cjoka_phys {
+
+// ---------- Rigidbody Helper Methods ----------
+void Rigidbody::addForce(const glm::vec3& force) {
+    if (!pxActor || kind != Kind::Dynamic) return;
+    auto* dyn = static_cast<PxRigidDynamic*>(pxActor);
+    dyn->wakeUp();
+    dyn->addForce(PxVec3(force.x, force.y, force.z), PxForceMode::eFORCE);
+}
+
+void Rigidbody::addImpulse(const glm::vec3& impulse) {
+    if (!pxActor || kind != Kind::Dynamic) return;
+    auto* dyn = static_cast<PxRigidDynamic*>(pxActor);
+    dyn->wakeUp();
+    dyn->addForce(PxVec3(impulse.x, impulse.y, impulse.z), PxForceMode::eIMPULSE);
+}
+
+void Rigidbody::addTorque(const glm::vec3& torque) {
+    if (!pxActor || kind != Kind::Dynamic) return;
+    auto* dyn = static_cast<PxRigidDynamic*>(pxActor);
+    dyn->wakeUp();
+    dyn->addTorque(PxVec3(torque.x, torque.y, torque.z), PxForceMode::eFORCE);
+}
+
+void Rigidbody::setLinearVelocity(const glm::vec3& vel) {
+    if (!pxActor || kind != Kind::Dynamic) return;
+    auto* dyn = static_cast<PxRigidDynamic*>(pxActor);
+    dyn->wakeUp();
+    dyn->setLinearVelocity(PxVec3(vel.x, vel.y, vel.z));
+}
+
+glm::vec3 Rigidbody::getLinearVelocity() const {
+    if (!pxActor || kind != Kind::Dynamic) return glm::vec3(0.0f);
+    auto* dyn = static_cast<const PxRigidDynamic*>(pxActor);
+    PxVec3 v = dyn->getLinearVelocity();
+    return glm::vec3(v.x, v.y, v.z);
+}
+
+void Rigidbody::setAngularVelocity(const glm::vec3& angVel) {
+    if (!pxActor || kind != Kind::Dynamic) return;
+    auto* dyn = static_cast<PxRigidDynamic*>(pxActor);
+    dyn->wakeUp();
+    dyn->setAngularVelocity(PxVec3(angVel.x, angVel.y, angVel.z));
+}
+
+glm::vec3 Rigidbody::getAngularVelocity() const {
+    if (!pxActor || kind != Kind::Dynamic) return glm::vec3(0.0f);
+    auto* dyn = static_cast<const PxRigidDynamic*>(pxActor);
+    PxVec3 v = dyn->getAngularVelocity();
+    return glm::vec3(v.x, v.y, v.z);
+}
 
 // ---------- Аллокатор ----------
 namespace {
@@ -36,8 +85,6 @@ static DefaultAllocator s_alloc;
 static ErrorHandler     s_err;
 static PxFoundation*    s_foundation = nullptr;
 static PxPhysics*       s_physics = nullptr;
-
-static PxDefaultErrorCallback g_defaultErrorCallback;
 }
 
 // ---------- Impl ----------
@@ -72,6 +119,7 @@ World::World(const glm::vec3& gravity) : m_impl(std::make_unique<Impl>()) {
     auto cpu = PxDefaultCpuDispatcherCreate(2);
     desc.cpuDispatcher = cpu;
     desc.filterShader = PxDefaultSimulationFilterShader;
+    desc.flags |= PxSceneFlag::eENABLE_CCD; // Глобальный CCD
     m_impl->scene = s_physics->createScene(desc);
     m_impl->defaultMat = s_physics->createMaterial(0.6f, 0.5f, 0.2f);
     m_impl->cctMgr = PxCreateControllerManager(*m_impl->scene);
@@ -85,32 +133,37 @@ World::~World() {
 
 void World::Step(float dt) {
     if (!m_impl->scene) return;
-    const float fixedStep = 1.0f/60.0f;
-    static float acc = 0; // per-world accumulator — ок для одной сцены в демо
-    acc += dt;
-    int steps = 0;
-    while (acc >= fixedStep && steps < 5) {
-        m_impl->scene->simulate(fixedStep);
-        m_impl->scene->fetchResults(true);
-        acc -= fixedStep; ++steps;
-    }
+    m_impl->scene->simulate(dt);
+    m_impl->scene->fetchResults(true);
 }
 
-static void SetupDynamic(PxRigidDynamic* d, const glm::vec3& he) {
-    // CCD для быстрых объектов (габарит > 20см)
-    float maxDim = std::max({he.x,he.y,he.z});
-    if (maxDim > 0.2f) d->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true);
-    // сон: уснул — не считаем (энергосбережение FPS)
+static void SetupDynamic(PxRigidDynamic* d, const glm::vec3& he, const Rigidbody& rb) {
+    if (rb.ccd) {
+        d->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true);
+    }
+    d->setLinearDamping(rb.linearDamping);
+    d->setAngularDamping(rb.angularDamping);
+    d->setActorFlag(PxActorFlag::eDISABLE_GRAVITY, !rb.gravity);
+
+    // Lock Rotation Flags
+    PxRigidDynamicLockFlags lockFlags;
+    if (rb.lockRotationX) lockFlags |= PxRigidDynamicLockFlag::eLOCK_ANGULAR_X;
+    if (rb.lockRotationY) lockFlags |= PxRigidDynamicLockFlag::eLOCK_ANGULAR_Y;
+    if (rb.lockRotationZ) lockFlags |= PxRigidDynamicLockFlag::eLOCK_ANGULAR_Z;
+    d->setRigidDynamicLockFlags(lockFlags);
+
     d->setSleepThreshold(0.05f);
-    d->setSolverIterationCounts(4, 1); // достаточно для ящиков
+    d->setSolverIterationCounts(4, 1);
 }
+
 void* World::CreateBoxActor(const glm::vec3& pos, const glm::vec3& he, bool dyn, float density) {
     PxBoxGeometry geo(he.x, he.y, he.z);
     PxTransform t(PxVec3(pos.x,pos.y,pos.z));
     PxRigidActor* a;
     if (dyn) {
         auto* d = PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density);
-        SetupDynamic(d, he);
+        Rigidbody defaultRb; defaultRb.density = density;
+        SetupDynamic(d, he, defaultRb);
         a = d;
     } else a = PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat);
     m_impl->scene->addActor(*a);
@@ -123,7 +176,8 @@ void* World::CreateSphereActor(const glm::vec3& pos, float r, bool dyn, float de
     PxRigidActor* a;
     if (dyn) {
         auto* d = PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density);
-        SetupDynamic(d, {r,r,r});
+        Rigidbody defaultRb; defaultRb.density = density;
+        SetupDynamic(d, {r,r,r}, defaultRb);
         a = d;
     } else a = PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat);
     m_impl->scene->addActor(*a);
@@ -181,19 +235,21 @@ Entity World::Raycast(Registry&, const glm::vec3& o, const glm::vec3& dir, float
     return ud ? (Entity)(uintptr_t)ud : NullEntity;
 }
 
-void World::AddImpulse(Entity e, const glm::vec3&) {}
+void World::AddImpulse(Entity e, const glm::vec3& impulse) {
+    if (!m_reg || !m_reg->valid(e)) return;
+    auto* rb = m_reg->try_get<Rigidbody>(e);
+    if (!rb || !rb->pxActor || rb->kind != Rigidbody::Kind::Dynamic) return;
+    rb->addImpulse(impulse);
+}
 
 void World::ThrowFrom(Entity e, const glm::vec3& vel) {
-    auto& rb = m_reg->get<Rigidbody>(e);
-    if (!rb.pxActor || rb.kind != Rigidbody::Kind::Dynamic) return;
-    auto* d = static_cast<PxRigidDynamic*>(rb.pxActor);
-    d->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true); // быстрый полёт — без туннелирования
-    d->wakeUp();
-    d->setLinearVelocity(PxVec3(vel.x, vel.y, vel.z));
+    if (!m_reg || !m_reg->valid(e)) return;
+    auto* rb = m_reg->try_get<Rigidbody>(e);
+    if (!rb || !rb->pxActor || rb->kind != Rigidbody::Kind::Dynamic) return;
+    rb->setLinearVelocity(vel);
 }
 
 void World::PushAt(const glm::vec3& origin, const glm::vec3& dir, float maxDist, float force) {
-    // рейкаст из камеры — первому динамическому телу даём импульс по направлению взгляда
     PxRaycastBuffer hit;
     bool ok = m_impl->scene->raycast(
         PxVec3(origin.x,origin.y,origin.z),
@@ -203,30 +259,39 @@ void World::PushAt(const glm::vec3& origin, const glm::vec3& dir, float maxDist,
     auto* actor = hit.block.actor;
     if (!actor) return;
     auto* dyn = actor->is<PxRigidDynamic>();
-    if (!dyn) return; // статика не толкается
-    // кинематики (в т.ч. CCT персонажа) не толкаем
+    if (!dyn) return;
     if (dyn->getRigidBodyFlags() & PxRigidBodyFlag::eKINEMATIC) return;
     PxVec3 imp(dir.x,dir.y,dir.z);
     imp = imp.getNormalized() * force;
     dyn->addForce(imp, PxForceMode::eIMPULSE);
 }
 
-// ---------- ECS интеграция ----------
 void World::BuildActors(Registry& reg) {
+    m_reg = &reg;
     for (Entity e : reg.view<Transform, MeshRenderer, Rigidbody>()) {
         auto& rb = reg.get<Rigidbody>(e);
-        if (rb.pxActor) continue; // уже есть
+        if (rb.pxActor) continue; // уже создан
         auto& tr = reg.get<Transform>(e);
-        auto& mr = reg.get<MeshRenderer>(e);
-        // коллайдер по размеру меша (упрощённо: sphere r=scale, box half=scale)
         bool dyn = rb.kind == Rigidbody::Kind::Dynamic;
-        void* actor = CreateBoxActor(tr.position, tr.scale*0.5f, dyn, rb.density);
+        void* actor = nullptr;
+        if (auto* col = reg.try_get<Collider>(e)) {
+            if (col->type == ColliderType::Sphere)
+                actor = CreateSphereActor(tr.position, col->radius, dyn, rb.density);
+            else
+                actor = CreateBoxActor(tr.position, col->halfExtents, dyn, rb.density);
+        } else {
+            actor = CreateBoxActor(tr.position, tr.scale * 0.5f, dyn, rb.density);
+        }
         rb.pxActor = actor;
         if (actor) {
             static_cast<PxRigidActor*>(actor)->userData = (void*)(uintptr_t)e;
+            if (dyn) {
+                SetupDynamic(static_cast<PxRigidDynamic*>(actor), tr.scale * 0.5f, rb);
+            }
         }
     }
 }
+
 void World::SyncToECS(Registry& reg) {
     for (Entity e : reg.view<Transform, Rigidbody>()) {
         auto& rb = reg.get<Rigidbody>(e);
@@ -235,13 +300,13 @@ void World::SyncToECS(Registry& reg) {
         auto p = a->getGlobalPose();
         auto& tr = reg.get<Transform>(e);
         tr.position = { p.p.x, p.p.y, p.p.z };
-        // quat -> euler degrees
         PxQuat q = p.q;
         glm::quat gq(q.w, q.x, q.y, q.z);
         glm::vec3 eu = glm::eulerAngles(gq);
         tr.rotation = { glm::degrees(eu.x), glm::degrees(eu.y), glm::degrees(eu.z) };
     }
 }
+
 void World::SetEntityUserdata(Registry&) {}
 
 namespace Global {

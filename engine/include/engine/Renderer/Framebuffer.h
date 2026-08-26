@@ -24,6 +24,7 @@ public:
 
     GLuint fbo() const { return m_fbo; }
     GLuint colorTexture() const { return m_color; }
+    GLuint depthTexture() const { return m_depth; }
     GLuint depthRBO() const { return m_depth; }
     int width() const { return m_w; }
     int height() const { return m_h; }

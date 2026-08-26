@@ -25,3 +25,5 @@ Thumbs.db
 
 # Deps
 .vcpkg/
+g.txt
+session-*.md

@@ -36,7 +36,7 @@ size_t Batcher::totalInstances() const {
     return n;
 }
 
-void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, ShadowMap* shadow) {
+void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow) {
     if (m_batches.empty()) return;
     static Shader* instanced = nullptr;
     if (!instanced) instanced = new Shader(DefaultShaders::kLitInstancedVS, DefaultShaders::kLitInstancedFS);
@@ -50,30 +50,39 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
     glm::vec3 fogCol{0.12f, 0.14f, 0.18f};
     float fogDen = 0.025f;
     float exposure = 1.0f;
-    if (!reg.view<Fog>().empty()) {
-        auto& f = reg.get<Fog>(reg.view<Fog>()[0]);
+    if (auto v = reg.view<Fog>(); !v.empty()) {
+        auto& f = reg.get<Fog>(*v.begin());
         fogCol = f.color; fogDen = f.density;
     }
-    if (!reg.view<Sky>().empty()) {
-        auto& s = reg.get<Sky>(reg.view<Sky>()[0]);
+    if (auto v = reg.view<Sky>(); !v.empty()) {
+        auto& s = reg.get<Sky>(*v.begin());
         exposure = s.exposure;
     }
     instanced->setVec3("uFogColor", fogCol);
     instanced->setFloat("uFogDensity", fogDen);
     instanced->setFloat("uExposure", exposure);
     instanced->setFloat("uTime", (float)glfwGetTime());
-    // тени
+    // тени CSM
     instanced->setBool("uHasShadow", shadow && shadow->ready());
     if (shadow && shadow->ready()) {
-        instanced->setMat4("uLightMatrix", shadow->matrix());
-        instanced->setInt("uShadowMap", 2);
-        shadow->Bind(2);
+        shadow->bind(2);
+        instanced->setInt("uShadowMapArray", 2);
+        const auto& splits = shadow->cascadeSplits();
+        const auto& matrices = shadow->lightMatrices();
+        for (int i = 0; i < 3; ++i) {
+            std::string name = "uLightMatrices[" + std::to_string(i) + "]";
+            instanced->setMat4(name.c_str(), matrices[i]);
+        }
+        for (size_t i = 0; i < splits.size(); ++i) {
+            std::string name = "uCascadeSplits[" + std::to_string(i) + "]";
+            instanced->setFloat(name.c_str(), splits[i]);
+        }
     }
 
     // Lights
     auto ambients = reg.view<AmbientLight>();
     if (!ambients.empty()) {
-        auto& a = reg.get<AmbientLight>(ambients[0]);
+        auto& a = reg.get<AmbientLight>(*ambients.begin());
         instanced->setVec3("uAmbientColor", a.color);
         instanced->setFloat("uAmbientIntensity", a.intensity);
     } else {
@@ -82,7 +91,7 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
     }
     auto dirs = reg.view<DirectionalLight>();
     if (!dirs.empty()) {
-        auto& d = reg.get<DirectionalLight>(dirs[0]);
+        auto& d = reg.get<DirectionalLight>(*dirs.begin());
         instanced->setBool("uHasDirLight", true);
         instanced->setVec3("uDirLight.direction", d.direction);
         instanced->setVec3("uDirLight.color", d.color);
@@ -90,14 +99,12 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
     } else {
         instanced->setBool("uHasDirLight", false);
     }
-    auto points = reg.view<PointLight, Transform>();
-    int cnt = std::min<int>(static_cast<int>(points.size()), 8);
-    instanced->setInt("uPointLightCount", cnt);
-    for (int i = 0; i < cnt; ++i) {
-        Entity e = points[static_cast<size_t>(i)];
+    int cnt = 0;
+    for (Entity e : reg.view<PointLight, Transform>()) {
+        if (cnt >= 8) break;
         auto& pl = reg.get<PointLight>(e);
         auto& tr = reg.get<Transform>(e);
-        std::string base = "uPointLights[" + std::to_string(i) + "]";
+        std::string base = "uPointLights[" + std::to_string(cnt) + "]";
         instanced->setVec3((base + ".position").c_str(), tr.position);
         instanced->setVec3((base + ".color").c_str(), pl.color);
         instanced->setFloat((base + ".intensity").c_str(), pl.intensity);
@@ -105,7 +112,9 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
         instanced->setFloat((base + ".constant").c_str(), pl.constant);
         instanced->setFloat((base + ".linear").c_str(), pl.linear);
         instanced->setFloat((base + ".quadratic").c_str(), pl.quadratic);
+        ++cnt;
     }
+    instanced->setInt("uPointLightCount", cnt);
 
     for (auto& [key, batch] : m_batches) {
         if (batch.instances.empty()) continue;

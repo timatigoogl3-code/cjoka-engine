@@ -49,16 +49,29 @@ uniform vec3 uViewPos;
 uniform vec3 uAmbientColor; uniform float uAmbientIntensity;
 struct DirLight{ vec3 direction; vec3 color; float intensity; };
 uniform DirLight uDirLight; uniform bool uHasDirLight;
-struct PointLight{ vec3 position; vec3 color; float intensity; float range; float constant; float linear; float quadratic; };
-#define MAX_POINT_LIGHTS 8
-uniform PointLight uPointLights[MAX_POINT_LIGHTS]; uniform int uPointLightCount;
+struct PointLight{ vec4 posRad; vec4 colInt; };
+layout(std430, binding = 0) readonly buffer LightBuffer { uint uNumLights; PointLight pointLights[]; };
+struct Cluster { uint lightCount; uint lightIndices[127]; };
+layout(std430, binding = 1) readonly buffer ClusterBuffer { Cluster clusters[]; };
+
+uniform mat4 uView;
+uniform vec2 uScreenSize;
+uniform float uZNear;
+uniform float uZFar;
+const uvec3 GRID_SIZE = uvec3(16, 9, 24);
+
 // PBR
 uniform vec3 uAlbedo; uniform float uMetallic; uniform float uRoughness; uniform float uAO;
 uniform vec3 uEmissive;
 uniform sampler2D uDiffuseMap; uniform bool uUseDiffuseMap;
-// shadows
-uniform mat4 uLightMatrix; uniform sampler2D uShadowMap; uniform bool uHasShadow;
+// cascaded shadows
+uniform mat4 uLightMatrices[3];
+uniform float uCascadeSplits[4];
+uniform sampler2DArray uShadowMapArray;
+uniform bool uHasShadow;
 uniform vec3 uFogColor; uniform float uFogDensity; uniform float uExposure;
+// sky environment IBL
+uniform vec3 uSkyTop; uniform vec3 uSkyHorizon; uniform vec3 uSkyBottom; uniform float uSkyExposure;
 
 const float PI = 3.14159265359;
 
@@ -79,24 +92,36 @@ vec3 FresnelSchlick(float cosTheta, vec3 F0){
 }
 float shadowFactor(vec3 worldPos, vec3 N, vec3 L, float viewDist){
     if(!uHasShadow) return 1.0;
-    vec4 lp = uLightMatrix * vec4(worldPos,1.0);
-    vec3 proj = lp.xyz/lp.w * 0.5 + 0.5;
-    if(proj.z>1.0) return 1.0;
-    float bias = max(0.0015*(1.0-dot(N,L)), 0.0008);
-    // радиус растёт с дистанцией — тени мягче вдали и растворяются к краю карты
-    float fade = clamp(1.0 - viewDist/60.0, 0.0, 1.0);
-    if(fade<=0.0) return 1.0;
-    float radius = (1.0 + viewDist*0.05) / vec2(textureSize(uShadowMap,0)).x * 2.0;
-    vec2 poisson[12] = vec2[](
-        vec2(-0.326,-0.406),vec2(-0.840,-0.074),vec2(-0.696, 0.457),vec2(-0.203, 0.621),
-        vec2( 0.962,-0.195),vec2( 0.473,-0.480),vec2( 0.519, 0.767),vec2( 0.185,-0.893),
-        vec2( 0.507, 0.064),vec2( 0.896, 0.412),vec2(-0.322,-0.933),vec2(-0.792,-0.598));
-    float s=0.0;
-    for(int i=0;i<12;++i){
-        float d=texture(uShadowMap, proj.xy+poisson[i]*radius).r;
-        s += (proj.z-bias > d) ? 0.0 : 1.0;
+    
+    // Select cascade index based on view distance
+    int cascadeIndex = 2;
+    if (viewDist < uCascadeSplits[1]) {
+        cascadeIndex = 0;
+    } else if (viewDist < uCascadeSplits[2]) {
+        cascadeIndex = 1;
     }
-    return mix(1.0, s/12.0, fade);
+
+    vec4 lp = uLightMatrices[cascadeIndex] * vec4(worldPos, 1.0);
+    vec3 proj = lp.xyz / lp.w * 0.5 + 0.5;
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) return 1.0;
+
+    float bias = max(0.0020 * (1.0 - dot(N, L)), 0.0006) * (1.0 + float(cascadeIndex) * 1.5);
+    vec2 texelSize = 1.0 / vec2(textureSize(uShadowMapArray, 0).xy);
+    float radius = (1.4 + float(cascadeIndex) * 0.8) * texelSize.x;
+
+    vec2 poisson[16] = vec2[](
+        vec2(-0.326,-0.406), vec2(-0.840,-0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
+        vec2( 0.962,-0.195), vec2( 0.473,-0.480), vec2( 0.519, 0.767), vec2( 0.185,-0.893),
+        vec2( 0.507, 0.064), vec2( 0.896, 0.412), vec2(-0.321,-0.932), vec2(-0.791,-0.597),
+        vec2(-0.308, 0.916), vec2( 0.134,-0.452), vec2(-0.612, 0.143), vec2( 0.421,-0.842)
+    );
+
+    float s = 0.0;
+    for(int i = 0; i < 16; ++i) {
+        float d = texture(uShadowMapArray, vec3(proj.xy + poisson[i] * radius, float(cascadeIndex))).r;
+        s += (proj.z - bias > d) ? 0.0 : 1.0;
+    }
+    return s * 0.0625;
 }
 vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, float rough, float metallic){
     vec3 H = normalize(V+L);
@@ -112,38 +137,84 @@ vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, flo
     return (kd*albedo/PI + spec)*radiance*NoL;
 }
 
+vec3 SampleSky(vec3 dir, float rough) {
+    float t = clamp(dir.y * (1.0 - rough * 0.7) * 0.5 + 0.5, 0.0, 1.0);
+    vec3 skyColor = mix(uSkyBottom, uSkyTop, t);
+    if(dir.y > -0.15 && dir.y < 0.35) {
+        float h = 1.0 - abs(dir.y - 0.1) / 0.25;
+        skyColor = mix(skyColor, uSkyHorizon, clamp(h, 0.0, 1.0));
+    }
+    return skyColor * uSkyExposure;
+}
+
 void main(){
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uViewPos - vWorldPos);
+    vec3 R = reflect(-V, N);
+    float NoV = max(dot(N, V), 1e-4);
+
     vec3 albedo = uAlbedo * vColor;
     if(uUseDiffuseMap) albedo *= texture(uDiffuseMap,vUV).rgb;
     float metallic = clamp(uMetallic,0.0,1.0);
     float rough = clamp(uRoughness,0.04,1.0);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
-    // ambient IBL-lite: hemisphere + AO
-    float hemi = N.y*0.5+0.5;
-    vec3 ambient = (uAmbientColor*uAmbientIntensity*mix(albedo,vec3(0.5),metallic*0.5))*(0.6+0.6*hemi)*uAO;
+    // PBR Environment IBL (Diffuse + Specular)
+    vec3 F_env = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(clamp(1.0 - NoV, 0.0, 1.0), 5.0);
+    vec3 kD_env = (vec3(1.0) - F_env) * (1.0 - metallic);
+    vec3 diffuseEnv = kD_env * albedo * (uAmbientColor * uAmbientIntensity * (0.5 + 0.5 * N.y));
+    
+    vec3 skySpecular = SampleSky(R, rough);
+    vec3 specularEnv = F_env * skySpecular;
+    vec3 ambient = (diffuseEnv + specularEnv) * uAO;
 
     vec3 Lo = vec3(0.0);
     if(uHasDirLight){
         vec3 L = normalize(-uDirLight.direction);
-        float sh = shadowFactor(vWorldPos,N,L, length(vWorldPos-uViewPos));
-        vec3 radiance = uDirLight.color*uDirLight.intensity;
-        Lo += ApplyLight(N,V,L,radiance,F0,albedo,rough,metallic)*sh;
+        float NoL = dot(N, L);
+        if(NoL > 0.0){
+            float sh = shadowFactor(vWorldPos,N,L, length(vWorldPos-uViewPos));
+            vec3 radiance = uDirLight.color*uDirLight.intensity;
+            Lo += ApplyLight(N,V,L,radiance,F0,albedo,rough,metallic)*sh;
+        }
     }
-    for(int i=0;i<uPointLightCount && i<MAX_POINT_LIGHTS;++i){
-        PointLight pl=uPointLights[i];
-        vec3 toL = pl.position - vWorldPos;
-        float dist = length(toL);
-        if(dist>pl.range) continue;
-        vec3 L = toL/dist;
-        float atten = 1.0/(pl.constant+pl.linear*dist+pl.quadratic*dist*dist);
-        float rangeFade = 1.0-clamp((dist-pl.range*0.7)/(pl.range*0.3),0.0,1.0);
-        Lo += ApplyLight(N,V,L,pl.color*pl.intensity*atten*rangeFade,F0,albedo,rough,metallic);
+    
+    // Cluster index calculation
+    vec4 viewPos = uView * vec4(vWorldPos, 1.0);
+    if(viewPos.z < 0.0) {
+        float slice = log(-viewPos.z / uZNear) * float(GRID_SIZE.z) / log(uZFar / uZNear);
+        uint zSlice = uint(clamp(int(slice), 0, int(GRID_SIZE.z) - 1));
+        uint xTile = uint(gl_FragCoord.x * float(GRID_SIZE.x) / uScreenSize.x);
+        uint yTile = uint(gl_FragCoord.y * float(GRID_SIZE.y) / uScreenSize.y);
+        
+        if (xTile < GRID_SIZE.x && yTile < GRID_SIZE.y) {
+            uint clusterIndex = xTile + yTile * GRID_SIZE.x + zSlice * (GRID_SIZE.x * GRID_SIZE.y);
+            uint lCount = clusters[clusterIndex].lightCount;
+            
+            for(uint i=0; i < lCount; ++i){
+                uint li = clusters[clusterIndex].lightIndices[i];
+                PointLight pl = pointLights[li];
+                
+                vec3 lpos = pl.posRad.xyz;
+                float lrange = pl.posRad.w;
+                vec3 lcol = pl.colInt.xyz;
+                float lintensity = pl.colInt.w;
+                
+                vec3 toL = lpos - vWorldPos;
+                float dist = length(toL);
+                if(dist > lrange) continue;
+                vec3 L = toL/dist;
+                
+                // standard quadratic falloff: 1 / (1 + (d/r)^2 * falloff_params)
+                // but simpler for RT: atten = max(0, 1 - (dist/range)^4)^2 / (dist^2 + 1)
+                float atten = 1.0 / (1.0 + 0.14*dist + 0.07*dist*dist);
+                float rangeFade = 1.0 - clamp((dist - lrange*0.7)/(lrange*0.3), 0.0, 1.0);
+                Lo += ApplyLight(N,V,L,lcol*lintensity*atten*rangeFade,F0,albedo,rough,metallic);
+            }
+        }
     }
 
-    vec3 color = ambient*uAO*0.35 + Lo + uEmissive;
+    vec3 color = ambient + Lo + uEmissive;
     // fog
     float fogF = exp(-uFogDensity*length(vWorldPos-uViewPos));
     color = mix(uFogColor,color,clamp(fogF,0.0,1.0));
@@ -180,15 +251,39 @@ out vec4 FragColor;
 uniform vec3 uViewPos;
 uniform vec3 uAmbientColor; uniform float uAmbientIntensity;
 struct DirLight{ vec3 direction; vec3 color; float intensity; }; uniform DirLight uDirLight; uniform bool uHasDirLight;
-struct PointLight{ vec3 position; vec3 color; float intensity; float range; float constant; float linear; float quadratic; };
-#define MAX_POINT_LIGHTS 8
-uniform PointLight uPointLights[MAX_POINT_LIGHTS]; uniform int uPointLightCount;
+struct PointLight{ vec4 posRad; vec4 colInt; };
+layout(std430, binding = 0) readonly buffer LightBuffer { uint uNumLights; PointLight pointLights[]; };
+struct Cluster { uint lightCount; uint lightIndices[127]; };
+layout(std430, binding = 1) readonly buffer ClusterBuffer { Cluster clusters[]; };
+
+uniform mat4 uView;
+uniform vec2 uScreenSize;
+uniform float uZNear;
+uniform float uZFar;
+const uvec3 GRID_SIZE = uvec3(16, 9, 24);
+
 uniform sampler2D uDiffuseMap; uniform bool uUseDiffuseMap;
 uniform sampler2D uSpecularMap; uniform bool uUseSpecularMap;
 uniform vec3 uFogColor; uniform float uFogDensity;
-uniform mat4 uLightMatrix; uniform sampler2D uShadowMap; uniform bool uHasShadow;
+// cascaded shadows
+uniform mat4 uLightMatrices[3];
+uniform float uCascadeSplits[4];
+uniform sampler2DArray uShadowMapArray;
+uniform bool uHasShadow;
+// sky environment IBL
+uniform vec3 uSkyTop; uniform vec3 uSkyHorizon; uniform vec3 uSkyBottom; uniform float uSkyExposure;
 
 const float PI = 3.14159265359;
+
+vec3 SampleSkyI(vec3 dir, float rough) {
+    float t = clamp(dir.y * (1.0 - rough * 0.7) * 0.5 + 0.5, 0.0, 1.0);
+    vec3 skyColor = mix(uSkyBottom, uSkyTop, t);
+    if(dir.y > -0.15 && dir.y < 0.35) {
+        float h = 1.0 - abs(dir.y - 0.1) / 0.25;
+        skyColor = mix(skyColor, uSkyHorizon, clamp(h, 0.0, 1.0));
+    }
+    return skyColor * uSkyExposure;
+}
 
 float DistributionGGX(vec3 N, vec3 H, float rough){
     float a = rough*rough; float a2 = a*a;
@@ -207,23 +302,35 @@ vec3 FresnelSchlick(float cosTheta, vec3 F0){
 }
 float shadowFactorI(vec3 worldPos, vec3 N, vec3 L, float viewDist){
     if(!uHasShadow) return 1.0;
-    vec4 lp = uLightMatrix * vec4(worldPos,1.0);
-    vec3 proj = lp.xyz/lp.w * 0.5 + 0.5;
-    if(proj.z>1.0) return 1.0;
-    float bias = max(0.0015*(1.0-dot(N,L)), 0.0008);
-    float fade = clamp(1.0 - viewDist/60.0, 0.0, 1.0);
-    if(fade<=0.0) return 1.0;
-    float radius = (1.0 + viewDist*0.05) / vec2(textureSize(uShadowMap,0)).x * 2.0;
-    vec2 poisson[12] = vec2[](
-        vec2(-0.326,-0.406),vec2(-0.840,-0.074),vec2(-0.696, 0.457),vec2(-0.203, 0.621),
-        vec2( 0.962,-0.195),vec2( 0.473,-0.480),vec2( 0.519, 0.767),vec2( 0.185,-0.893),
-        vec2( 0.507, 0.064),vec2( 0.896, 0.412),vec2(-0.322,-0.933),vec2(-0.792,-0.598));
-    float s=0.0;
-    for(int i=0;i<12;++i){
-        float d=texture(uShadowMap, proj.xy+poisson[i]*radius).r;
-        s += (proj.z-bias > d) ? 0.0 : 1.0;
+    
+    int cascadeIndex = 2;
+    if (viewDist < uCascadeSplits[1]) {
+        cascadeIndex = 0;
+    } else if (viewDist < uCascadeSplits[2]) {
+        cascadeIndex = 1;
     }
-    return mix(1.0, s/12.0, fade);
+
+    vec4 lp = uLightMatrices[cascadeIndex] * vec4(worldPos, 1.0);
+    vec3 proj = lp.xyz / lp.w * 0.5 + 0.5;
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) return 1.0;
+
+    float bias = max(0.0020 * (1.0 - dot(N, L)), 0.0006) * (1.0 + float(cascadeIndex) * 1.5);
+    vec2 texelSize = 1.0 / vec2(textureSize(uShadowMapArray, 0).xy);
+    float radius = (1.4 + float(cascadeIndex) * 0.8) * texelSize.x;
+
+    vec2 poisson[16] = vec2[](
+        vec2(-0.326,-0.406), vec2(-0.840,-0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
+        vec2( 0.962,-0.195), vec2( 0.473,-0.480), vec2( 0.519, 0.767), vec2( 0.185,-0.893),
+        vec2( 0.507, 0.064), vec2( 0.896, 0.412), vec2(-0.321,-0.932), vec2(-0.791,-0.597),
+        vec2(-0.308, 0.916), vec2( 0.134,-0.452), vec2(-0.612, 0.143), vec2( 0.421,-0.842)
+    );
+
+    float s = 0.0;
+    for(int i = 0; i < 16; ++i) {
+        float d = texture(uShadowMapArray, vec3(proj.xy + poisson[i] * radius, float(cascadeIndex))).r;
+        s += (proj.z - bias > d) ? 0.0 : 1.0;
+    }
+    return s * 0.0625;
 }
 vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, float rough, float metallic){
     vec3 Hv = normalize(V+L);
@@ -240,31 +347,67 @@ vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, flo
 
 void main(){
     vec3 N=normalize(vNormal); vec3 V=normalize(uViewPos - vWorldPos);
+    vec3 R = reflect(-V, N);
+    float NoV = max(dot(N, V), 1e-4);
+
     vec3 albedo=vInstAlbedo.rgb * vColor;
     float rough = clamp(vInstAlbedo.a, 0.04, 1.0);
     float metallic = clamp(vInstEmissive.a, 0.0, 1.0);
     if(uUseDiffuseMap) albedo*=texture(uDiffuseMap,vUV).rgb;
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
-    float hemi=N.y*0.5+0.5;
-    vec3 ambient=(uAmbientColor*uAmbientIntensity*mix(albedo,vec3(0.5),metallic*0.5))*(0.6+0.6*hemi);
+    // PBR Environment IBL (Diffuse + Specular)
+    vec3 F_env = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(clamp(1.0 - NoV, 0.0, 1.0), 5.0);
+    vec3 kD_env = (vec3(1.0) - F_env) * (1.0 - metallic);
+    vec3 diffuseEnv = kD_env * albedo * (uAmbientColor * uAmbientIntensity * (0.5 + 0.5 * N.y));
+    
+    vec3 skySpecular = SampleSkyI(R, rough);
+    vec3 specularEnv = F_env * skySpecular;
+    vec3 ambient = (diffuseEnv + specularEnv);
 
     vec3 Lo=vec3(0.0);
     if(uHasDirLight){
         vec3 L=normalize(-uDirLight.direction);
-        float sh=shadowFactorI(vWorldPos,N,L, length(vWorldPos-uViewPos));
-        Lo += ApplyLight(N,V,L,uDirLight.color*uDirLight.intensity,F0,albedo,rough,metallic)*sh;
+        float NoL = dot(N, L);
+        if(NoL > 0.0){
+            float sh=shadowFactorI(vWorldPos,N,L, length(vWorldPos-uViewPos));
+            Lo += ApplyLight(N,V,L,uDirLight.color*uDirLight.intensity,F0,albedo,rough,metallic)*sh;
+        }
     }
-    for(int i=0;i<uPointLightCount && i<MAX_POINT_LIGHTS;++i){
-        PointLight pl=uPointLights[i]; 
-        vec3 toL=pl.position-vWorldPos; float dist=length(toL); if(dist>pl.range) continue;
-        vec3 L=toL/dist;
-        float atten=1.0/(pl.constant+pl.linear*dist+pl.quadratic*dist*dist);
-        float rangeFade=1.0-clamp((dist-pl.range*0.7)/(pl.range*0.3),0.0,1.0);
-        Lo += ApplyLight(N,V,L,pl.color*pl.intensity*atten*rangeFade,F0,albedo,rough,metallic);
+    // Cluster index calculation
+    vec4 viewPos = uView * vec4(vWorldPos, 1.0);
+    if(viewPos.z < 0.0) {
+        float slice = log(-viewPos.z / uZNear) * float(GRID_SIZE.z) / log(uZFar / uZNear);
+        uint zSlice = uint(clamp(int(slice), 0, int(GRID_SIZE.z) - 1));
+        uint xTile = uint(gl_FragCoord.x * float(GRID_SIZE.x) / uScreenSize.x);
+        uint yTile = uint(gl_FragCoord.y * float(GRID_SIZE.y) / uScreenSize.y);
+        
+        if (xTile < GRID_SIZE.x && yTile < GRID_SIZE.y) {
+            uint clusterIndex = xTile + yTile * GRID_SIZE.x + zSlice * (GRID_SIZE.x * GRID_SIZE.y);
+            uint lCount = clusters[clusterIndex].lightCount;
+            
+            for(uint i=0; i < lCount; ++i){
+                uint li = clusters[clusterIndex].lightIndices[i];
+                PointLight pl = pointLights[li];
+                
+                vec3 lpos = pl.posRad.xyz;
+                float lrange = pl.posRad.w;
+                vec3 lcol = pl.colInt.xyz;
+                float lintensity = pl.colInt.w;
+                
+                vec3 toL = lpos - vWorldPos;
+                float dist = length(toL);
+                if(dist > lrange) continue;
+                vec3 L = toL/dist;
+                
+                float atten = 1.0 / (1.0 + 0.14*dist + 0.07*dist*dist);
+                float rangeFade = 1.0 - clamp((dist - lrange*0.7)/(lrange*0.3), 0.0, 1.0);
+                Lo += ApplyLight(N,V,L,lcol*lintensity*atten*rangeFade,F0,albedo,rough,metallic);
+            }
+        }
     }
 
-    vec3 color = ambient*0.35 + Lo + vInstEmissive.rgb;
+    vec3 color = ambient + Lo + vInstEmissive.rgb;
     float fogF=exp(-uFogDensity*length(vWorldPos-uViewPos));
     color=mix(uFogColor,color,clamp(fogF,0.0,1.0));
     FragColor=vec4(color,1.0); // линейный HDR — тонемап в composite
@@ -422,4 +565,223 @@ void main(){
 }
 )";
 
+// Instanced cluster lit — model matrix per instance, всё остальное из uniform.
+// Выходы те же что kLitVS → kLitFS работает без изменений.
+inline const char* kClusterInstancedVS = R"(
+#version 460 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aColor;
+layout(location=2) in vec3 aNormal;
+layout(location=3) in vec2 aUV;
+layout(location=4) in mat4 aModel; // 4,5,6,7 — per-instance
+out vec3 vColor; out vec2 vUV; out vec3 vNormal; out vec3 vWorldPos;
+uniform mat4 uView; uniform mat4 uProj;
+void main(){
+    vColor=aColor; vUV=aUV;
+    vec4 wp = aModel * vec4(aPos,1.0);
+    vWorldPos = wp.xyz;
+    vNormal = normalize(transpose(inverse(mat3(aModel))) * aNormal);
+    gl_Position = uProj * uView * wp;
+}
+)";
+
+// Instanced cluster shadow — depth only
+inline const char* kShadowInstancedVS = R"(
+#version 460 core
+layout(location=0) in vec3 aPos;
+layout(location=4) in mat4 aModel; // per-instance
+uniform mat4 uLightVP;
+void main(){ gl_Position = uLightVP * aModel * vec4(aPos,1.0); }
+)";
+
+// Skinned Lit VS — скелетная анимация (до 128 костей)
+inline const char* kSkinnedLitVS = R"(
+#version 460 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+layout(location=3) in ivec4 aBoneIds;
+layout(location=4) in vec4 aWeights;
+out vec3 vColor; out vec2 vUV; out vec3 vNormal; out vec3 vWorldPos;
+uniform mat4 uMVP; uniform mat4 uModel; uniform mat3 uNormalMat;
+const int MAX_BONES = 128;
+uniform mat4 uBones[MAX_BONES];
+void main(){
+    vColor = vec3(1.0);
+    vUV = aUV;
+    mat4 skinMat = aWeights.x * uBones[aBoneIds.x] +
+                   aWeights.y * uBones[aBoneIds.y] +
+                   aWeights.z * uBones[aBoneIds.z] +
+                   aWeights.w * uBones[aBoneIds.w];
+    vec4 localPos = skinMat * vec4(aPos, 1.0);
+    vec4 wp = uModel * localPos;
+    vWorldPos = wp.xyz;
+    vec3 localNorm = mat3(skinMat) * aNormal;
+    vNormal = normalize(uNormalMat * localNorm);
+    gl_Position = uMVP * localPos;
+}
+)";
+
+// Skinned Shadow VS — глубина для скелетных моделей
+inline const char* kSkinnedShadowVS = R"(
+#version 460 core
+layout(location=0) in vec3 aPos;
+layout(location=3) in ivec4 aBoneIds;
+layout(location=4) in vec4 aWeights;
+uniform mat4 uLightMatrix; uniform mat4 uModel;
+const int MAX_BONES = 128;
+uniform mat4 uBones[MAX_BONES];
+void main(){
+    mat4 skinMat = aWeights.x * uBones[aBoneIds.x] +
+                   aWeights.y * uBones[aBoneIds.y] +
+                   aWeights.z * uBones[aBoneIds.z] +
+                   aWeights.w * uBones[aBoneIds.w];
+    gl_Position = uLightMatrix * uModel * (skinMat * vec4(aPos, 1.0));
+}
+)";
+
+// Decal Shader (Projected OBB / Surface Decals)
+inline const char* kDecalVS = R"(#version 460 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec4 vClipPos;
+out vec3 vLocalPos;
+void main(){
+    vLocalPos = aPos;
+    vClipPos = uMVP * vec4(aPos, 1.0);
+    gl_Position = vClipPos;
+}
+)";
+
+inline const char* kDecalFS = R"(#version 460 core
+in vec4 vClipPos;
+in vec3 vLocalPos;
+out vec4 FragColor;
+
+uniform sampler2D uDecalTexture;
+uniform vec4 uDecalColor;
+uniform bool uIsProjected;
+uniform sampler2D uDepthTexture;
+uniform mat4 uInvViewProj;
+uniform mat4 uInvModel;
+
+void main(){
+    if (!uIsProjected) {
+        vec2 uv = vLocalPos.xy + 0.5;
+        vec4 col = texture(uDecalTexture, uv) * uDecalColor;
+        if (col.a < 0.02) discard;
+        FragColor = col;
+        return;
+    }
+
+    vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+    float depth = texture(uDepthTexture, screenUV).r;
+    if (depth >= 1.0) discard;
+
+    vec4 ndc = vec4(screenUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 worldPos = uInvViewProj * ndc;
+    worldPos /= worldPos.w;
+
+    vec4 localPos = uInvModel * worldPos;
+    if (abs(localPos.x) > 0.5 || abs(localPos.y) > 0.5 || abs(localPos.z) > 0.5) {
+        discard;
+    }
+
+    vec2 decalUV = localPos.xz + 0.5;
+    vec4 col = texture(uDecalTexture, decalUV) * uDecalColor;
+    float edgeFade = clamp((0.5 - abs(localPos.y)) * 4.0, 0.0, 1.0);
+    col.a *= edgeFade;
+
+    if (col.a < 0.02) discard;
+    FragColor = col;
+}
+)";
+
+// Temporal Anti-Aliasing (TAA) with YCoCg Neighborhood Color Clamping
+inline const char* kTAAFS = R"(
+#version 460 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uCurrentColor;
+uniform sampler2D uHistoryColor;
+uniform sampler2D uDepth;
+uniform mat4 uInvViewProj;
+uniform mat4 uPrevViewProj;
+uniform vec2 uTexelSize;
+uniform float uFeedbackFactor;
+
+vec3 RGBToYCoCg(vec3 c) {
+    return vec3(
+         0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+         0.5  * c.r             - 0.5  * c.b,
+        -0.25 * c.r + 0.5 * c.g - 0.25 * c.b
+    );
+}
+
+vec3 YCoCgToRGB(vec3 c) {
+    return vec3(
+        c.x + c.y - c.z,
+        c.x + c.z,
+        c.x - c.y - c.z
+    );
+}
+
+void main() {
+    vec4 current = texture(uCurrentColor, vUV);
+    
+    vec3 minColor = RGBToYCoCg(current.rgb);
+    vec3 maxColor = minColor;
+    
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec3 neighbor = RGBToYCoCg(texture(uCurrentColor, vUV + vec2(x, y) * uTexelSize).rgb);
+            minColor = min(minColor, neighbor);
+            maxColor = max(maxColor, neighbor);
+        }
+    }
+
+    float depth = texture(uDepth, vUV).r;
+    vec4 clipPos = vec4(vUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 worldPos = uInvViewProj * clipPos;
+    worldPos /= worldPos.w;
+
+    vec4 prevClipPos = uPrevViewProj * worldPos;
+    prevClipPos /= prevClipPos.w;
+    vec2 prevUV = prevClipPos.xy * 0.5 + 0.5;
+
+    if (prevUV.x < 0.0 || prevUV.x > 1.0 || prevUV.y < 0.0 || prevUV.y > 1.0) {
+        FragColor = current;
+        return;
+    }
+
+    vec4 history = texture(uHistoryColor, prevUV);
+    vec3 historyYCoCg = RGBToYCoCg(history.rgb);
+
+    historyYCoCg = clamp(historyYCoCg, minColor, maxColor);
+    vec3 clampedHistory = YCoCgToRGB(historyYCoCg);
+
+    float blend = clamp(uFeedbackFactor, 0.82, 0.95);
+    vec3 finalColor = mix(current.rgb, clampedHistory, blend);
+
+    FragColor = vec4(finalColor, 1.0);
+}
+)";
+
 } // namespace DefaultShaders
+
+// Плоский цвет без света (debug-визуализация LOD кластеров)
+inline const char* kFlatVS = R"(
+#version 460 core
+layout(location=0) in vec3 aPos;
+uniform mat4 uMVP;
+void main(){ gl_Position = uMVP * vec4(aPos,1.0); }
+)";
+inline const char* kFlatFS = R"(
+#version 460 core
+uniform vec3 uColor;
+out vec4 FragColor;
+void main(){ FragColor = vec4(uColor,1.0); }
+)";
+

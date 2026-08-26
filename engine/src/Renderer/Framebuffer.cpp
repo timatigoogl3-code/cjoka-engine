@@ -32,10 +32,14 @@ void Framebuffer::create(int w,int h,bool hdr,bool withDepth){
     glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,m_color,0);
 
     if(withDepth){
-        glGenRenderbuffers(1,&m_depth);
-        glBindRenderbuffer(GL_RENDERBUFFER,m_depth);
-        glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,w,h);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_STENCIL_ATTACHMENT,GL_RENDERBUFFER,m_depth);
+        glGenTextures(1, &m_depth);
+        glBindTexture(GL_TEXTURE_2D, m_depth);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_depth, 0);
     }
 
     if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE){
@@ -44,7 +48,7 @@ void Framebuffer::create(int w,int h,bool hdr,bool withDepth){
     glBindFramebuffer(GL_FRAMEBUFFER,0);
 }
 void Framebuffer::destroy(){
-    if(m_depth) { glDeleteRenderbuffers(1,&m_depth); m_depth=0; }
+    if(m_depth) { glDeleteTextures(1,&m_depth); m_depth=0; }
     if(m_color) { glDeleteTextures(1,&m_color); m_color=0; }
     if(m_fbo) { glDeleteFramebuffers(1,&m_fbo); m_fbo=0; }
 }

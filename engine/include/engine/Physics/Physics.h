@@ -1,27 +1,12 @@
 #pragma once
 // Physics — обёртка NVIDIA PhysX 5.5 над ECS cjoka.
-// Классика: гравитация, rigid body (динамика/статика), коллайдеры (box/sphere/capsule/plane/mesh),
-// Character Controller (ходьба/прыжок без ракет), рейкасты.
-// БЕЗ: машин, ткани, частиц, разрушений.
-//
-//   Physics::Init();                       // один раз
-//   auto e = scene.createCube(...);
-//   e.emplace<Rigidbody>{Rigidbody::Dynamic()};  // упадёт
-//   Physics::Step(dt); Systems::PhysicsSync(registry);  // в onUpdate
+// Предоставляет глубокую интеграцию с ECS: компоненты Rigidbody, Collider, CharacterController,
+// силовые импульсы, рейкасты и непрерывное обнаружение столкновений (CCD).
 #include "engine/ECS/Components.h"
 #include "engine/ECS/Registry.h"
 #include <memory>
 #include <vector>
-
-namespace physx {
-class PxFoundation;
-class PxPhysics;
-class PxScene;
-class PxMaterial;
-class PxRigidActor;
-class PxRigidDynamic;
-class PxShape;
-}
+#include <glm/glm.hpp>
 
 namespace cjoka_phys {
 
@@ -33,21 +18,60 @@ struct Collider {
     glm::vec3 halfExtents = {0.5f,0.5f,0.5f}; // box
     float radius = 0.5f;                      // sphere/capsule
     float height = 1.0f;                      // capsule (полная)
+    glm::vec3 centerOffset = {0.0f, 0.0f, 0.0f};
     float staticFriction = 0.6f;
     float dynamicFriction = 0.5f;
     float restitution = 0.2f;                 // прыгучесть
+    bool isTrigger = false;
+
+    static Collider Box(const glm::vec3& half = {0.5f,0.5f,0.5f}) {
+        Collider c; c.type = ColliderType::Box; c.halfExtents = half; return c;
+    }
+    static Collider Sphere(float r = 0.5f) {
+        Collider c; c.type = ColliderType::Sphere; c.radius = r; return c;
+    }
+    static Collider Capsule(float r = 0.35f, float h = 1.2f) {
+        Collider c; c.type = ColliderType::Capsule; c.radius = r; c.height = h; return c;
+    }
 };
 
 struct Rigidbody {
     enum class Kind { Static, Dynamic, Kinematic };
     Kind kind = Kind::Dynamic;
-    float density = 1.0f;      // кг/м³ (масса считается)
+    float density = 1.0f;      // кг/м³ (масса считается автоматически)
     float linearDamping = 0.05f;
     float angularDamping = 0.05f;
     bool gravity = true;
-    // runtime
+    bool ccd = true;           // Continuous Collision Detection (без проваливания сквозь пол)
+    bool lockRotationX = false;
+    bool lockRotationY = false;
+    bool lockRotationZ = false;
+
+    // runtime handle
     void* pxActor = nullptr;   // PxRigidActor*
+
+    static Rigidbody Dynamic(float dens = 1.0f) {
+        Rigidbody r; r.kind = Kind::Dynamic; r.density = dens; return r;
+    }
+    static Rigidbody Static() {
+        Rigidbody r; r.kind = Kind::Static; return r;
+    }
+    static Rigidbody Kinematic() {
+        Rigidbody r; r.kind = Kind::Kinematic; return r;
+    }
+
+    void addForce(const glm::vec3& force);
+    void addImpulse(const glm::vec3& impulse);
+    void addTorque(const glm::vec3& torque);
+    void setLinearVelocity(const glm::vec3& vel);
+    glm::vec3 getLinearVelocity() const;
+    void setAngularVelocity(const glm::vec3& angVel);
+    glm::vec3 getAngularVelocity() const;
 };
+
+// Aliases
+using RigidBodyComponent = Rigidbody;
+using ColliderComponent = Collider;
 
 // События столкновений (заполняются после Step)
 struct CollisionEvents {
@@ -70,12 +94,12 @@ public:
     explicit World(const glm::vec3& gravity = {0,-9.81f,0});
     ~World();
 
-    void Step(float dt);         // фикс шаг внутри
+    void Step(float dt);         // фикс шаг PhysX
 private:
-    Registry* m_reg = nullptr;   // для ThrowFrom/PushAt
+    Registry* m_reg = nullptr;
 public:
     void SyncToECS(Registry& reg);          // PhysX -> Transform
-    void BuildFromECS(Registry& reg) { m_reg=&reg; BuildActors(reg); }       // создать акторов для новых MeshRenderer+Rigidbody
+    void BuildFromECS(Registry& reg) { m_reg=&reg; BuildActors(reg); }
     void BuildActors(Registry& reg);
 
     // Создание вручную (без ECS) — для особых случаев

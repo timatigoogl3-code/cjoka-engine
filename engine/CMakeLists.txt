@@ -9,7 +9,9 @@ set_target_properties(glad PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON
 # ---- Engine ----
 add_library(cjoka_engine STATIC
     src/Core/Window.cpp
+    src/Core/Input.cpp
     src/Core/Application.cpp
+    src/Scene/SceneManager.cpp
     src/Renderer/Shader.cpp
     src/Renderer/Mesh3D.cpp
     src/Renderer/Renderer.cpp
@@ -21,10 +23,39 @@ add_library(cjoka_engine STATIC
     src/Renderer/Batcher.cpp
     src/Renderer/Skybox.cpp
     src/Renderer/ShadowMap.cpp
+    src/Renderer/CascadedShadowMap.cpp
+    src/Renderer/ForwardPlus.cpp
+    src/Renderer/MeshClusters.cpp
+    src/Renderer/Decal.cpp
     src/Assets/AssetManager.cpp
     src/GUI/Font.cpp
     src/GUI/kGUI.cpp
+    src/GUI/ImGuiLayer.cpp
+    src/Audio/AudioEngine.cpp
     src/Physics/Physics.cpp
+    src/Animation/FBXLoader.cpp
+    third_party/ufbx/ufbx.c
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_demo.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/backends/imgui_impl_glfw.cpp
+    third_party/imgui/backends/imgui_impl_opengl3.cpp
+    third_party/imguizmo/ImGuizmo.cpp
+)
+set_source_files_properties(
+    src/Audio/AudioEngine.cpp
+    third_party/ufbx/ufbx.c
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_demo.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/backends/imgui_impl_glfw.cpp
+    third_party/imgui/backends/imgui_impl_opengl3.cpp
+    third_party/imguizmo/ImGuizmo.cpp
+    PROPERTIES COMPILE_OPTIONS "-w"
 )
 
 # ---- PhysX 5.5 (prebuilt static) ----
@@ -48,16 +79,24 @@ target_include_directories(cjoka_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glad/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/entt/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui/backends
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imguizmo
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio
 )
 
 find_package(OpenGL REQUIRED)
 find_package(glfw3 3.3 REQUIRED)
+find_package(Threads REQUIRED)
 
 target_link_libraries(cjoka_engine PUBLIC
     glad
     physx5
     OpenGL::GL
     glfw
+    Threads::Threads
+    m
     dl
 )
 

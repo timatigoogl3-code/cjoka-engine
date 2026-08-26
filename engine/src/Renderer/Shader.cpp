@@ -28,6 +28,20 @@ Shader::Shader(const char* vs, const char* fs) {
     glDeleteShader(v);
     glDeleteShader(f);
 }
+
+Shader::Shader(const char* cs) {
+    GLuint c = compile(GL_COMPUTE_SHADER, cs);
+    m_id = glCreateProgram();
+    glAttachShader(m_id, c);
+    glLinkProgram(m_id);
+    GLint ok = 0; glGetProgramiv(m_id, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024]; glGetProgramInfoLog(m_id, sizeof(log), nullptr, log);
+        std::cerr << "Compute Program link error: " << log << "\n";
+    }
+    glDeleteShader(c);
+}
+
 Shader::~Shader() { if (m_id) glDeleteProgram(m_id); }
 Shader::Shader(Shader&& o) noexcept : m_id(o.m_id) { o.m_id = 0; }
 Shader& Shader::operator=(Shader&& o) noexcept {
@@ -43,6 +57,9 @@ void Shader::setVec3(const char* n, glm::vec3 v) const { glUniform3fv(glGetUnifo
 void Shader::setVec4(const char* n, glm::vec4 v) const { glUniform4fv(glGetUniformLocation(m_id, n), 1, glm::value_ptr(v)); }
 void Shader::setMat3(const char* n, const glm::mat3& m) const { glUniformMatrix3fv(glGetUniformLocation(m_id, n), 1, GL_FALSE, glm::value_ptr(m)); }
 void Shader::setMat4(const char* n, const glm::mat4& m) const { glUniformMatrix4fv(glGetUniformLocation(m_id, n), 1, GL_FALSE, glm::value_ptr(m)); }
+void Shader::setMat4Array(const char* n, const glm::mat4* values, int count) const {
+    glUniformMatrix4fv(glGetUniformLocation(m_id, n), count, GL_FALSE, glm::value_ptr(values[0]));
+}
 
 Shader Shader::FromFiles(const char* vertPath, const char* fragPath) {
     auto readFile = [](const char* p)->std::string {

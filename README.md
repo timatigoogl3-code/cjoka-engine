@@ -1,76 +1,57 @@
-# cjoka — модульный игровой движок (C++20 / Clang / OpenGL 3.3)
+# cjoka Engine — Modular C++20 / OpenGL 4.6 / PhysX 5.5 Game Engine
 
-```
-cjoka/
-├── CMakeLists.txt          # корень: C++20, clang, add_subdirectory(engine, game)
-├── CMakePresets.json       # clang-debug / clang-release (Ninja)
-├── engine/                 # СТАТИЧЕСКАЯ БИБЛИОТЕКА — не пересобирается при правке игры
-│   ├── CMakeLists.txt      # libcjoka_engine.a + libglad.a
-│   ├── third_party/glad/   # glad 2.0.8 gl:core=3.3 + loader (glad --api gl:core=3.3 --out-path third_party/glad c --loader)
-│   └── include/engine/
-│       ├── Engine.h        # umbrella: #include <engine/Engine.h>
-│       ├── Core/Window.h, Application.h
-│       ├── Renderer/Shader.h, Mesh3D.h, Renderer.h
-│       └── ECS/Registry.h, Components.h, Systems.h
-├── game/                   # ИГРОВАЯ ЛОГИКА — правишь только тут, линковка без пересборки движка
-│   ├── CMakeLists.txt      # exe cjoka -> PRIVATE cjoka_engine
-│   └── src/Game.h, Game.cpp, main.cpp
-└── build/                  # Ninja out (gitignore)
-```
+**cjoka** — высокопроизводительный 3D игровой движок на C++20, созданный с фокусом на Data-Oriented Architecture (ECS), физическую симуляцию NVIDIA PhysX 5.5, виртуализацию геометрии ClusterLOD и PBR-рендеринг.
 
-## Требования
-`clang 21`, `cmake 4.2+`, `ninja`, `libglfw3-dev`, `libglm-dev`, `libopengl-dev`
+---
+
+## Архитектура и подсистемы
+
+### 1. Data-Oriented ECS & Scene Management
+* **EnTT Sparse-Set Registry**: Чистый Data-Oriented Design без тяжелых ООП-оберток над объектами сцены.
+* **Scene Manager (`SceneManager.h`)**: Регистрация, сериализация и переключение активных сцен в рантайме.
+* **Prefabs Layer (`Prefabs.h`)**: Полное отделение специфичной логики уровней и ассетов от базового кода ядра движка.
+
+### 2. Графический конвейер (PBR, ClusterLOD, Decals)
+* **ClusterLOD (Nanite-Lite)**: Автоматическая кластеризация высокополигональных мешей по кривой Мортона с иерархическим переключением LOD и аппаратным GPU-инстансингом.
+* **Projected Decals (`DecalSystem`)**: Проекционные декали на основе обратной реконструкции глубины OBB для дорожной разметки, следов шин и повреждений поверхностей.
+* **PBR & Освещение**: Модель Cook-Torrance (GGX, Smith, Fresnel-Schlick), многоисточниковое освещение (Directional, Point Lights, Ambient) и мягкие тени с Poisson disk sampling.
+* **HDR & Post-Processing**: Полноэкранный HDR-буфер с эффектом Bloom (Dual-pass blur), виньетированием, адаптацией экспозиции и ACES Tonemapping.
+
+### 3. Физика PhysX 5.5 и транспорт
+* **NVIDIA PhysX 5.5 Core**: Полная интеграция CCT (Character Controller), Rigidbodies, Continuous Collision Detection (CCD) и триггерных объемов.
+* **GTA-стиль транспорт (`Vehicle.h`)**: Физическая модель сцепления колес, дифференциал, ручной тормоз, занос и динамические коллизии с препятствиями.
+* **PBD Cloth Simulation (`ClothCape.h`)**: Симуляция ткани с динамикой ветра и реакцией на скорость движения персонажа.
+
+### 4. 3D Spatial Audio
+* **Spatial Audio Engine (`AudioEngine.h`)**: Высокопроизводительный движок на базе Miniaudio с позиционированием звука в пространстве, расчетом расстояний и кривыми затухания.
+
+---
+
+## Управление в демонстрации Grand Highway
+
+| Клавиша / Ввод | Действие |
+| :--- | :--- |
+| **`1`** | Загрузка сцены: **Grand Highway Showcase** |
+| **`2`** | Загрузка сцены: **PhysX Destruction Arena** |
+| **`3`** | Загрузка сцены: **ClusterLOD Forest Benchmark** |
+| **`E`** | Сесть в автомобиль / Выйти из автомобиля |
+| **`WASD`** | Управление движением / Автомобилем (газ, тормоз, руль) |
+| **`Space`** | Ручной тормоз (дрифт) в машине / Прыжок пешком |
+| **`V`** | Переключение камеры (1-е / 3-е лицо) |
+| **`F`** | Бросок физического ящика вперед |
+| **Клик мыши** | Захват курсора для управления камерой |
+| **`Escape`** | Освобождение курсора мыши |
+
+---
+
+## Сборка и запуск
+
+Сборка осуществляется через встроенный скрипт `sjoka.sh` (Clang / CMake / Ninja):
 
 ```bash
-sudo apt install libglfw3-dev libglm-dev libopengl-dev
+# Полная компиляция движка и игры
+./sjoka.sh compile all
+
+# Запуск
+./sjoka.sh run
 ```
-
-## Сборка (через sjoka.sh)
-
-```bash
-./sjoka.sh compile engine          # только движок  -> build/engine/libcjoka_engine.a
-./sjoka.sh compile engine --release
-./sjoka.sh compile game            # игра + движок  -> build/cjoka
-./sjoka.sh compile all --release   # всё
-./sjoka.sh play game               # собрать и запустить (требует DISPLAY)
-./sjoka.sh precompile shaders      # шейдеры → binary (.spv + .h + bundle)
-./sjoka.sh clean
-```
-
-Или напрямую cmake:
-```bash
-cmake --preset clang-debug && cmake --build --preset debug    # -> build/cjoka
-cmake --preset clang-release && cmake --build --preset release
-./build/cjoka
-```
-
-Инкрементальная сборка: `touch game/src/Game.cpp && ./sjoka.sh compile game` — пересоберется только `Game.cpp.o` + линковка, `engine/libcjoka_engine.a` не трогается.
-
-## Шейдеры → binary
-
-```bash
-./sjoka.sh precompile shaders          # ищет assets/shaders/*.vert/*.frag
-# → build/shaders/*.spv (если есть glslc/glslang) + build/shaders/shaders.h (xxd) + shaders.bundle
-# → дубль в assets/shaders/binary/ (для коммита)
-# Подключи в движке: #include "build/shaders/shaders.h"
-```
-
-## Как писать игру
-
-```cpp
-// game/src/Game.cpp
-void Game::onInit() {
-    Entity e = registry().create();
-    registry().emplace<Transform>(e, Transform{{0,0,0}});
-    registry().emplace<MeshRenderer>(e, MeshRenderer{m_cube});
-}
-void Game::onUpdate(float dt) {
-    registry().get<Transform>(e).rotation.y += 40*dt;
-    Systems::Render(registry(), *m_shader, view, proj);
-}
-```
-
-Новый файл → добавь в `game/CMakeLists.txt: add_executable(cjoka src/MySystem.cpp ...)`.
-
-## Стек
-`C++20`, `Clang 21`, `OpenGL 3.3 Core`, `GLFW 3.4`, `GLAD 2`, `GLM`, `Ninja`, `CMake 3.20+`

@@ -8,8 +8,10 @@
 #include "engine/Renderer/Shader.h"
 #include "engine/Renderer/DefaultShaders.h"
 #include "engine/Renderer/Batcher.h"
-#include "engine/Renderer/ShadowMap.h"
+#include "engine/Renderer/CascadedShadowMap.h"
 #include "engine/Core/Window.h"
+#include "engine/Math/Frustum.h"
+#include "engine/Renderer/ForwardPlus.h"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -17,7 +19,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 
 // Глобальная карта теней (одна на кадр — направленный свет)
-inline ShadowMap& GlobalShadow() { static ShadowMap s; return s; }
+inline CascadedShadowMap& GlobalShadow() { static CascadedShadowMap s; return s; }
 
 namespace Systems {
 
@@ -30,7 +32,8 @@ inline void RenderUnlit(Registry& reg, const Shader& shader, const glm::mat4& vi
     for (Entity e : reg.view<Transform, MeshRenderer>()) {
         auto& tr = reg.get<Transform>(e);
         auto& mr = reg.get<MeshRenderer>(e);
-        if (!mr.visible || !mr.mesh || mr.mesh->empty()) continue;
+        bool hasCluster = mr.clusterMesh && !mr.clusterMesh->empty();
+        if (!mr.visible || ((!mr.mesh || mr.mesh->empty()) && !hasCluster)) continue;
         glm::mat4 model = tr.matrix();
         shader.setMat4("uMVP", proj * view * model);
         shader.setMat4("uModel", model);
@@ -48,88 +51,253 @@ inline void RenderUnlit(Registry& reg, const Shader& shader, const glm::mat4& vi
 // ------------------------------------------------------------------
 // Lit — Blinn-Phong + Fog + HDR (красивый)
 // ------------------------------------------------------------------
-inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, ShadowMap* shadow = nullptr) {
-    shader.use();
-    shader.setMat4("uView", view);
-    shader.setMat4("uProj", proj);
-    shader.setVec3("uViewPos", viewPos);
-    shader.setFloat("uTime", static_cast<float>(glfwGetTime()));
+// Ленивая кластеризация: только для тяжелых высокополигональных мешей (>= 512 индексов)
+inline void ClusterLODAutoFill(Registry& reg) {
+    if (!cluster_lod::enabled) return;
+    for (Entity e : reg.view<Transform, MeshRenderer>()) {
+        auto& mr = reg.get<MeshRenderer>(e);
+        if (mr.clusterLOD && mr.mesh && !mr.mesh->empty() && !mr.clusterMesh)
+            mr.clusterMesh = Assets::ClusteredFrom(mr.mesh);
+    }
+}
+inline void NaniteAutoFill(Registry& reg) { ClusterLODAutoFill(reg); }
 
-    // Lights
-    if (auto v = reg.view<AmbientLight>(); !v.empty()) {
-        auto& a = reg.get<AmbientLight>(v[0]);
-        shader.setVec3("uAmbientColor", a.color);
-        shader.setFloat("uAmbientIntensity", a.intensity);
-    } else {
-        shader.setVec3("uAmbientColor", glm::vec3(0.15f));
-        shader.setFloat("uAmbientIntensity", 1.0f);
+// кластерный путь активен?
+inline bool ClusterLODActive(const MeshRenderer& mr) {
+    bool has = mr.clusterMesh && !mr.clusterMesh->empty();
+    if (!has) return false;
+    if (!mr.mesh || mr.mesh->empty()) return true;            // cluster-only
+    return cluster_lod::enabled && mr.clusterLOD;             // обычные объекты уважают флаги
+}
+inline bool NaniteActive(const MeshRenderer& mr) { return ClusterLODActive(mr); }
+
+// Обновление скелетных анимаций
+inline void AnimationUpdate(Registry& reg, float dt) {
+    for (Entity e : reg.view<AnimatorComponent>()) {
+        auto& anim = reg.get<AnimatorComponent>(e);
+        if (anim.animator) {
+            anim.animator->update(dt);
+        }
     }
-    if (auto v = reg.view<DirectionalLight>(); !v.empty()) {
-        auto& d = reg.get<DirectionalLight>(v[0]);
-        shader.setBool("uHasDirLight", true);
-        shader.setVec3("uDirLight.direction", d.direction);
-        shader.setVec3("uDirLight.color", d.color);
-        shader.setFloat("uDirLight.intensity", d.intensity);
-    } else {
-        shader.setBool("uHasDirLight", false);
+}
+
+inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow = nullptr, float screenW = 1280.0f, float screenH = 720.0f) {
+    // --- Instanced cluster shader (lazy init) ---
+    static Shader* clusterShader = nullptr;
+    if (!clusterShader) clusterShader = new Shader(DefaultShaders::kClusterInstancedVS, DefaultShaders::kLitFS);
+    static ForwardPlus* forwardPlus = nullptr;
+    if (!forwardPlus) {
+        forwardPlus = new ForwardPlus();
+        forwardPlus->init();
     }
-    auto points = reg.view<PointLight, Transform>();
-    int cnt = std::min<int>(static_cast<int>(points.size()), 8);
-    shader.setInt("uPointLightCount", cnt);
-    for (int i = 0; i < cnt; ++i) {
-        Entity e = points[static_cast<size_t>(i)];
+
+    // --- Skinned mesh shader (lazy init) ---
+    static Shader* skinnedShader = nullptr;
+    if (!skinnedShader) skinnedShader = new Shader(DefaultShaders::kSkinnedLitVS, DefaultShaders::kLitFS);
+
+    auto setupLighting = [&](const Shader& sh) {
+        sh.use();
+        sh.setVec3("uViewPos", viewPos);
+        sh.setFloat("uTime", static_cast<float>(glfwGetTime()));
+        if (auto v = reg.view<AmbientLight>(); v.begin() != v.end()) {
+            auto& a = reg.get<AmbientLight>(*v.begin());
+            sh.setVec3("uAmbientColor", a.color); sh.setFloat("uAmbientIntensity", a.intensity);
+        } else { sh.setVec3("uAmbientColor", glm::vec3(0.15f)); sh.setFloat("uAmbientIntensity", 1.0f); }
+        if (auto v = reg.view<DirectionalLight>(); v.begin() != v.end()) {
+            auto& d = reg.get<DirectionalLight>(*v.begin());
+            sh.setBool("uHasDirLight", true);
+            sh.setVec3("uDirLight.direction", d.direction); sh.setVec3("uDirLight.color", d.color);
+            sh.setFloat("uDirLight.intensity", d.intensity);
+        } else { sh.setBool("uHasDirLight", false); }
+
+        sh.setMat4("uView", view);
+        sh.setMat4("uProj", proj);
+        sh.setVec2("uScreenSize", glm::vec2(screenW, screenH));
+        float nearP = proj[3][2] / (proj[2][2] - 1.0f);
+        float farP = proj[3][2] / (proj[2][2] + 1.0f);
+        sh.setFloat("uZNear", nearP);
+        sh.setFloat("uZFar", farP);
+        
+        forwardPlus->bindBuffers(0, 1);
+
+        glm::vec3 fogCol{0.12f,0.14f,0.18f}; float fogDen=0.025f;
+        if (auto v = reg.view<Fog>(); v.begin() != v.end()) { auto& f=reg.get<Fog>(*v.begin()); fogCol=f.color; fogDen=f.density; }
+        sh.setVec3("uFogColor", fogCol); sh.setFloat("uFogDensity", fogDen);
+        
+        Sky sky;
+        if (auto v = reg.view<Sky>(); v.begin() != v.end()) sky = reg.get<Sky>(*v.begin());
+        sh.setFloat("uExposure", sky.exposure);
+        sh.setVec3("uSkyTop", sky.top);
+        sh.setVec3("uSkyHorizon", sky.horizon);
+        sh.setVec3("uSkyBottom", sky.bottom);
+        sh.setFloat("uSkyExposure", sky.exposure);
+
+        sh.setBool("uHasShadow", shadow && shadow->ready());
+        if (shadow && shadow->ready()) {
+            shadow->bind(2);
+            sh.setInt("uShadowMapArray", 2);
+            const auto& splits = shadow->cascadeSplits();
+            const auto& matrices = shadow->lightMatrices();
+            for (int i = 0; i < 3; ++i) {
+                std::string name = "uLightMatrices[" + std::to_string(i) + "]";
+                sh.setMat4(name.c_str(), matrices[i]);
+            }
+            for (size_t i = 0; i < splits.size(); ++i) {
+                std::string name = "uCascadeSplits[" + std::to_string(i) + "]";
+                sh.setFloat(name.c_str(), splits[i]);
+            }
+        }
+    };
+
+    struct ClusterGroup {
+        const Material* material = nullptr;
+        std::vector<glm::mat4> models;
+    };
+    std::unordered_map<ClusteredMesh*, ClusterGroup> clusterGroups;
+    std::vector<Entity> nonClusterEntities;
+
+    std::vector<PointLightData> fwLights;
+    for (Entity e : reg.view<PointLight, Transform>()) {
         auto& pl = reg.get<PointLight>(e);
         auto& tr = reg.get<Transform>(e);
-        std::string b = "uPointLights[" + std::to_string(i) + "]";
-        shader.setVec3((b + ".position").c_str(), tr.position);
-        shader.setVec3((b + ".color").c_str(), pl.color);
-        shader.setFloat((b + ".intensity").c_str(), pl.intensity);
-        shader.setFloat((b + ".range").c_str(), pl.range);
-        shader.setFloat((b + ".constant").c_str(), pl.constant);
-        shader.setFloat((b + ".linear").c_str(), pl.linear);
-        shader.setFloat((b + ".quadratic").c_str(), pl.quadratic);
+        fwLights.push_back({
+            glm::vec4(tr.position, pl.range),
+            glm::vec4(pl.color, pl.intensity)
+        });
     }
+    forwardPlus->cullLights(view, proj, fwLights, screenW, screenH);
 
-    // Fog / Sky
-    glm::vec3 fogCol{0.12f, 0.14f, 0.18f};
-    float fogDen = 0.025f, exposure = 1.0f;
-    if (!reg.view<Fog>().empty()) { auto& f = reg.get<Fog>(reg.view<Fog>()[0]); fogCol = f.color; fogDen = f.density; }
-    if (!reg.view<Sky>().empty()) exposure = reg.get<Sky>(reg.view<Sky>()[0]).exposure;
-    shader.setVec3("uFogColor", fogCol);
-    shader.setFloat("uFogDensity", fogDen);
-    shader.setFloat("uExposure", exposure);
-    // тени
-    shader.setBool("uHasShadow", shadow && shadow->ready());
-    if (shadow && shadow->ready()) {
-        shader.setMat4("uLightMatrix", shadow->matrix());
-        shader.setInt("uShadowMap", 2);
-        shadow->Bind(2);
-    }
+    Math::Frustum frustum = Math::Frustum::createFrustumFromMatrix(proj * view);
 
     for (Entity e : reg.view<Transform, MeshRenderer>()) {
-        auto& tr = reg.get<Transform>(e);
         auto& mr = reg.get<MeshRenderer>(e);
-        if (!mr.visible || !mr.mesh || mr.mesh->empty()) continue;
+        if (!mr.visible) continue;
+        
+        auto& tr = reg.get<Transform>(e);
         glm::mat4 model = tr.matrix();
-        shader.setMat4("uMVP", proj * view * model);
-        shader.setMat4("uModel", model);
-        shader.setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
-        shader.setVec3("uAlbedo", mr.material.albedo);
-        shader.setFloat("uMetallic", mr.material.metallic);
-        shader.setFloat("uRoughness", mr.material.roughness <= 0.02f ? 0.5f : mr.material.roughness);
-        shader.setFloat("uAO", mr.material.ao);
-        shader.setVec3("uEmissive", mr.material.emissive);
-        if (mr.material.useDiffuseMap && mr.material.diffuseMap && mr.material.diffuseMap->valid()) {
-            shader.setBool("uUseDiffuseMap", true);
-            mr.material.diffuseMap->bind(0);
-            shader.setInt("uDiffuseMap", 0);
-        } else shader.setBool("uUseDiffuseMap", false);
-        if (mr.material.useSpecularMap && mr.material.specularMap && mr.material.specularMap->valid()) {
-            shader.setBool("uUseSpecularMap", true);
-            mr.material.specularMap->bind(1);
-            shader.setInt("uSpecularMap", 1);
-        } else shader.setBool("uUseSpecularMap", false);
-        mr.mesh->draw();
+        
+        // Frustum Culling
+        if (mr.mesh && !mr.mesh->empty()) {
+            if (!frustum.isOnFrustum(mr.mesh->minExtents(), mr.mesh->maxExtents(), model)) {
+                continue;
+            }
+        }
+        
+        bool hasCluster = ClusterLODActive(mr);
+        if (hasCluster) {
+            auto& grp = clusterGroups[mr.clusterMesh.get()];
+            if (!grp.material) grp.material = &mr.material;
+            grp.models.push_back(model);
+        } else if (mr.mesh && !mr.mesh->empty()) {
+            nonClusterEntities.push_back(e);
+        }
+    }
+
+    // 1. Instanced cluster draw
+    if (!clusterGroups.empty()) {
+        float tanHalf = 1.0f / proj[1][1];
+        float fovYrad = 2.0f * std::atan(tanHalf);
+        glm::mat4 vp = proj * view;
+
+        setupLighting(*clusterShader);
+        clusterShader->use();
+        clusterShader->setMat4("uView", view);
+        clusterShader->setMat4("uProj", proj);
+
+        for (auto& [mesh, grp] : clusterGroups) {
+            const Material& mat = *grp.material;
+            clusterShader->setVec3("uAlbedo", mat.albedo);
+            clusterShader->setFloat("uMetallic", mat.metallic);
+            clusterShader->setFloat("uRoughness", mat.roughness <= 0.02f ? 0.5f : mat.roughness);
+            clusterShader->setFloat("uAO", mat.ao);
+            clusterShader->setVec3("uEmissive", mat.emissive);
+            if (mat.useDiffuseMap && mat.diffuseMap && mat.diffuseMap->valid()) {
+                clusterShader->setBool("uUseDiffuseMap", true);
+                mat.diffuseMap->bind(0); clusterShader->setInt("uDiffuseMap", 0);
+            } else clusterShader->setBool("uUseDiffuseMap", false);
+            if (mat.useSpecularMap && mat.specularMap && mat.specularMap->valid()) {
+                clusterShader->setBool("uUseSpecularMap", true);
+                mat.specularMap->bind(1); clusterShader->setInt("uSpecularMap", 1);
+            } else clusterShader->setBool("uUseSpecularMap", false);
+
+            mesh->DrawInstanced(grp.models.data(), (int)grp.models.size(),
+                                viewPos, vp, fovYrad, screenH, cluster_lod::thresholdPx);
+        }
+    }
+
+    // 2. Skinned mesh entities (Skeletal Animation)
+    auto skinnedEntities = reg.view<Transform, SkinnedMeshRenderer>();
+    if (skinnedEntities.begin() != skinnedEntities.end()) {
+        setupLighting(*skinnedShader);
+        skinnedShader->use();
+        skinnedShader->setMat4("uView", view);
+        skinnedShader->setMat4("uProj", proj);
+
+        for (Entity e : skinnedEntities) {
+            auto& tr = reg.get<Transform>(e);
+            auto& smr = reg.get<SkinnedMeshRenderer>(e);
+            if (!smr.visible || !smr.mesh || smr.mesh->empty()) continue;
+
+            glm::mat4 model = tr.matrix();
+            skinnedShader->setMat4("uMVP", proj * view * model);
+            skinnedShader->setMat4("uModel", model);
+            skinnedShader->setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
+            skinnedShader->setVec3("uAlbedo", smr.material.albedo);
+            skinnedShader->setFloat("uMetallic", smr.material.metallic);
+            skinnedShader->setFloat("uRoughness", smr.material.roughness <= 0.02f ? 0.5f : smr.material.roughness);
+            skinnedShader->setFloat("uAO", smr.material.ao);
+            skinnedShader->setVec3("uEmissive", smr.material.emissive);
+            if (smr.material.useDiffuseMap && smr.material.diffuseMap && smr.material.diffuseMap->valid()) {
+                skinnedShader->setBool("uUseDiffuseMap", true);
+                smr.material.diffuseMap->bind(0);
+                skinnedShader->setInt("uDiffuseMap", 0);
+            } else skinnedShader->setBool("uUseDiffuseMap", false);
+            if (smr.material.useSpecularMap && smr.material.specularMap && smr.material.specularMap->valid()) {
+                skinnedShader->setBool("uUseSpecularMap", true);
+                smr.material.specularMap->bind(1);
+                skinnedShader->setInt("uSpecularMap", 1);
+            } else skinnedShader->setBool("uUseSpecularMap", false);
+
+            // Bones
+            auto* animComp = reg.try_get<AnimatorComponent>(e);
+            if (animComp && animComp->animator) {
+                const auto& mats = animComp->animator->finalBoneMatrices();
+                int cnt = static_cast<int>(std::min(mats.size(), static_cast<size_t>(Animation::Animator::MAX_BONES)));
+                skinnedShader->setMat4Array("uBones[0]", mats.data(), cnt);
+            } else {
+                static std::vector<glm::mat4> identBones(Animation::Animator::MAX_BONES, glm::mat4(1.0f));
+                skinnedShader->setMat4Array("uBones[0]", identBones.data(), static_cast<int>(identBones.size()));
+            }
+
+            smr.mesh->draw();
+        }
+    }
+
+    // 3. Regular non-cluster meshes
+    if (!nonClusterEntities.empty()) {
+        setupLighting(shader);
+        shader.use();
+        shader.setMat4("uView", view); shader.setMat4("uProj", proj);
+        for (Entity e : nonClusterEntities) {
+            auto& tr = reg.get<Transform>(e);
+            auto& mr = reg.get<MeshRenderer>(e);
+            glm::mat4 model = tr.matrix();
+            shader.setMat4("uMVP", proj * view * model);
+            shader.setMat4("uModel", model);
+            shader.setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
+            shader.setVec3("uAlbedo", mr.material.albedo);
+            shader.setFloat("uMetallic", mr.material.metallic);
+            shader.setFloat("uRoughness", mr.material.roughness <= 0.02f ? 0.5f : mr.material.roughness);
+            shader.setFloat("uAO", mr.material.ao);
+            shader.setVec3("uEmissive", mr.material.emissive);
+            if (mr.material.useDiffuseMap && mr.material.diffuseMap && mr.material.diffuseMap->valid()) {
+                shader.setBool("uUseDiffuseMap", true); mr.material.diffuseMap->bind(0); shader.setInt("uDiffuseMap", 0);
+            } else shader.setBool("uUseDiffuseMap", false);
+            if (mr.material.useSpecularMap && mr.material.specularMap && mr.material.specularMap->valid()) {
+                shader.setBool("uUseSpecularMap", true); mr.material.specularMap->bind(1); shader.setInt("uSpecularMap", 1);
+            } else shader.setBool("uUseSpecularMap", false);
+            mr.mesh->draw();
+        }
     }
 }
 
@@ -168,18 +336,64 @@ inline void DrawSky(const glm::mat4& view, const glm::mat4& proj, const Sky* sky
 inline void RenderShadowPass(Registry& reg, const glm::mat4& lightMatrix) {
     static Shader* sh = nullptr;
     if (!sh) sh = new Shader(DefaultShaders::kShadowDepthVS, DefaultShaders::kShadowDepthFS);
+    static Shader* shInst = nullptr;
+    if (!shInst) shInst = new Shader(DefaultShaders::kShadowInstancedVS, DefaultShaders::kShadowDepthFS);
+    static Shader* shSkinned = nullptr;
+    if (!shSkinned) shSkinned = new Shader(DefaultShaders::kSkinnedShadowVS, DefaultShaders::kShadowDepthFS);
+
+    std::unordered_map<ClusteredMesh*, std::vector<glm::mat4>> clusterGroups;
+
+    Math::Frustum lightFrustum = Math::Frustum::createFrustumFromMatrix(lightMatrix);
+
     sh->use();
-    sh->setMat4("uLightMatrix", lightMatrix);
     for (Entity e : reg.view<Transform, MeshRenderer>()) {
         auto& mr = reg.get<MeshRenderer>(e);
-        if (!mr.visible || !mr.mesh || mr.mesh->empty()) continue;
-        if (reg.get<Transform>(e).scale.x <= 0.f) continue;
-        // большие статические объекты тоже отбрасывают — castShadow по умолчанию true
-        sh->setMat4("uModel", reg.get<Transform>(e).matrix());
-        // uLightMatrix уже содержит view*proj; модель отдельно
-        // но шейдер один uniform — домножим на CPU: передадим LM*model
-        sh->setMat4("uLightMatrix", lightMatrix * reg.get<Transform>(e).matrix());
-        mr.mesh->draw();
+        if (!mr.visible || !mr.castShadow) continue;
+        auto& tr = reg.get<Transform>(e);
+        if (tr.scale.x <= 0.f) continue;
+        
+        glm::mat4 model = tr.matrix();
+        
+        // Frustum Culling against light frustum
+        if (mr.mesh && !mr.mesh->empty()) {
+            if (!lightFrustum.isOnFrustum(mr.mesh->minExtents(), mr.mesh->maxExtents(), model)) {
+                continue;
+            }
+            sh->setMat4("uModel", model);
+            sh->setMat4("uLightMatrix", lightMatrix * model);
+            mr.mesh->draw();
+        } else if (ClusterLODActive(mr) && mr.clusterMesh) {
+            clusterGroups[mr.clusterMesh.get()].push_back(model);
+        }
+    }
+
+    if (!clusterGroups.empty()) {
+        shInst->use();
+        shInst->setMat4("uLightVP", lightMatrix);
+        glm::vec3 approxEye = glm::vec3(0, 40, 0); // свет сверху
+        for (auto& [mesh, models] : clusterGroups) {
+            if (mesh) mesh->DrawInstancedShadow(models.data(), (int)models.size(), approxEye, lightMatrix, cluster_lod::thresholdPx);
+        }
+    }
+
+    // Skinned shadows
+    for (Entity e : reg.view<Transform, SkinnedMeshRenderer>()) {
+        auto& tr = reg.get<Transform>(e);
+        auto& smr = reg.get<SkinnedMeshRenderer>(e);
+        if (!smr.visible || !smr.castShadow || !smr.mesh || smr.mesh->empty()) continue;
+        shSkinned->use();
+        shSkinned->setMat4("uLightMatrix", lightMatrix);
+        shSkinned->setMat4("uModel", tr.matrix());
+        auto* animComp = reg.try_get<AnimatorComponent>(e);
+        if (animComp && animComp->animator) {
+            const auto& mats = animComp->animator->finalBoneMatrices();
+            int cnt = static_cast<int>(std::min(mats.size(), static_cast<size_t>(Animation::Animator::MAX_BONES)));
+            shSkinned->setMat4Array("uBones[0]", mats.data(), cnt);
+        } else {
+            static std::vector<glm::mat4> identBones(Animation::Animator::MAX_BONES, glm::mat4(1.0f));
+            shSkinned->setMat4Array("uBones[0]", identBones.data(), static_cast<int>(identBones.size()));
+        }
+        smr.mesh->draw();
     }
 }
 
@@ -202,40 +416,63 @@ inline void Render(Registry& reg, const Shader& shader, const Window& window) {
     float aspect = static_cast<float>(w) / static_cast<float>(h ? h : 1);
     Entity cam = NullEntity;
     for (Entity e : reg.view<Camera, Transform>()) if (reg.get<Camera>(e).primary) { cam=e; break; }
-    if (cam==NullEntity) { auto v=reg.view<Camera, Transform>(); if(!v.empty()) cam=v[0]; }
+    if (cam==NullEntity) { auto v=reg.view<Camera, Transform>(); if(v.begin() != v.end()) cam=*v.begin(); }
     glm::mat4 view(1), proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
     glm::vec3 viewPos{0,0,5};
     Sky* skyPtr=nullptr;
-    if (!reg.view<Sky>().empty()) skyPtr=&reg.get<Sky>(reg.view<Sky>()[0]);
+    if (auto v = reg.view<Sky>(); v.begin() != v.end()) skyPtr=&reg.get<Sky>(*v.begin());
     if (cam!=NullEntity) { auto& c=reg.get<Camera>(cam); auto& t=reg.get<Transform>(cam); view=Camera::viewFromTransform(t); proj=c.projection(aspect); viewPos=t.position; }
 
-    // --- SHADOW PASS ---
-    bool shadowOn=false;
-    glm::mat4 lightMat(1);
-    if (auto v = reg.view<DirectionalLight>(); !v.empty()) {
-        auto& sun = reg.get<DirectionalLight>(v[0]);
-        lightMat = SunLightMatrix(viewPos, sun);
-        GlobalShadow().Begin(lightMat);
-        RenderShadowPass(reg, lightMat);
-        GlobalShadow().End(w,h);
-        shadowOn=true;
+    NaniteAutoFill(reg);
+
+    // --- CASCADED SHADOW PASS ---
+    bool shadowOn = false;
+    if (auto v = reg.view<DirectionalLight>(); v.begin() != v.end()) {
+        auto& sun = reg.get<DirectionalLight>(*v.begin());
+        auto& csm = GlobalShadow();
+        auto matrices = csm.calculateLightMatrices(view, proj, sun.direction);
+
+        static int shadowFrame = 0;
+        if (++shadowFrame >= nanite::shadowEveryNFrames) {
+            shadowFrame = 0;
+            for (int c = 0; c < CascadedShadowMap::CASCADE_COUNT; ++c) {
+                csm.beginCascade(c, matrices[c]);
+                RenderShadowPass(reg, matrices[c]);
+            }
+            csm.end();
+        }
+        shadowOn = csm.ready();
     }
 
     DrawSky(view, proj, skyPtr);
 
     // Динамический батчинг: если много одинаковых мешей — инстансим
     auto viewTrMesh = reg.view<Transform, MeshRenderer>();
-    if (viewTrMesh.size() > 6) {
+    NaniteAutoFill(reg);
+    bool anyCluster = false;
+    for (Entity e : viewTrMesh) { if (NaniteActive(reg.get<MeshRenderer>(e))) { anyCluster = true; break; } }
+    if (!anyCluster && viewTrMesh.size_hint() > 6) {
         Batcher batcher; batcher.begin();
-        for (Entity e : viewTrMesh) batcher.submit(reg.get<Transform>(e), reg.get<MeshRenderer>(e));
-        if (batcher.batchCount() < viewTrMesh.size() / 2) {
+        Math::Frustum mainFrustum = Math::Frustum::createFrustumFromMatrix(proj * view);
+        for (Entity e : viewTrMesh) {
+            auto& mr = reg.get<MeshRenderer>(e);
+            if (!mr.mesh || mr.mesh->empty() || !mr.visible) continue;
+            auto& tr = reg.get<Transform>(e);
+            if (!mainFrustum.isOnFrustum(mr.mesh->minExtents(), mr.mesh->maxExtents(), tr.matrix())) continue;
+            batcher.submit(tr, mr);
+        }
+        if (batcher.batchCount() < viewTrMesh.size_hint() / 2) {
             batcher.flush(reg, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr);
+            Renderer::DecalSystem::Render(reg, view, proj, 0);
             return;
         }
     }
     bool hasLight = reg.count<DirectionalLight>()>0 || reg.count<PointLight>()>0;
-    if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr);
+    if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr, (float)w, (float)h);
     else RenderUnlit(reg, shader, view, proj, viewPos);
+
+    // Декали поверх геометрии сцены
+    Renderer::DecalSystem::Render(reg, view, proj, 0);
 }
 
 // ------------------------------------------------------------------

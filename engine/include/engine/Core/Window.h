@@ -29,12 +29,7 @@ public:
     int width() const { return m_width; }
     int height() const { return m_height; }
 
-    // drag&drop — закинул .obj/.jpg в окно → сразу спавн
-    std::vector<std::string> pollDroppedFiles();
-
 private:
     GLFWwindow* m_window = nullptr;
     int m_width = 0, m_height = 0;
-    std::vector<std::string> m_drops;
-    void setupDropCallback();
 };

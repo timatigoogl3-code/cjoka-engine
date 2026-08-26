@@ -119,4 +119,31 @@ void FXAA(GLuint tex){
     DrawFullscreen();
 }
 
+static Shader* s_taa = nullptr;
+
+void TAA(GLuint currentTex, GLuint depthTex, GLuint historyTex, GLuint outFBO, const glm::mat4& invVP, const glm::mat4& prevVP, float feedback) {
+    if (!s_taa) s_taa = new Shader(DefaultShaders::kPostVS, DefaultShaders::kTAAFS);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, outFBO);
+    glViewport(0, 0, s_w, s_h);
+    s_taa->use();
+    s_taa->setInt("uCurrentColor", 0);
+    s_taa->setInt("uHistoryColor", 1);
+    s_taa->setInt("uDepth", 2);
+    s_taa->setMat4("uInvViewProj", invVP);
+    s_taa->setMat4("uPrevViewProj", prevVP);
+    s_taa->setVec2("uTexelSize", glm::vec2(1.0f / float(s_w), 1.0f / float(s_h)));
+    s_taa->setFloat("uFeedbackFactor", feedback);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, currentTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, historyTex);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, depthTex);
+
+    DrawFullscreen();
+    glActiveTexture(GL_TEXTURE0);
+}
+
 } // namespace PostProcess

@@ -12,8 +12,10 @@ RenderPipeline::RenderPipeline(int w,int h): m_w(w), m_h(h) {
     m_bloomPing.create(hw,hh,true,false);
     m_bloomPong.create(hw,hh,true,false);
     m_composite.create(w,h,true,false);
+    m_taaHistory[0].create(w,h,true,false);
+    m_taaHistory[1].create(w,h,true,false);
     PostProcess::Init(w,h);
-    std::cout << "[RenderPipeline] HDR " << w << "x" << h << " + bloom half\n";
+    std::cout << "[RenderPipeline] HDR " << w << "x" << h << " + bloom half + TAA\n";
 }
 RenderPipeline::~RenderPipeline(){
     PostProcess::Shutdown();
@@ -24,6 +26,8 @@ void RenderPipeline::resize(int w,int h){
     m_w=w; m_h=h;
     m_hdr.resize(w,h);
     m_composite.resize(w,h);
+    m_taaHistory[0].resize(w,h);
+    m_taaHistory[1].resize(w,h);
     int hw=w/2, hh=h/2;
     m_bloomExtract.resize(hw,hh);
     m_bloomPing.resize(hw,hh);
@@ -31,10 +35,15 @@ void RenderPipeline::resize(int w,int h){
     PostProcess::Resize(w,h);
 }
 
+void RenderPipeline::setCameraMatrices(const glm::mat4& view, const glm::mat4& proj) {
+    m_prevViewProj = (m_frameIndex == 0) ? (proj * view) : m_currentViewProj;
+    m_currentViewProj = proj * view;
+}
+
 void RenderPipeline::syncFromRegistry(const Registry& reg){
     auto v = reg.view<PostProcessSettings>();
     if (v.empty()) return;
-    const auto& p = reg.get<PostProcessSettings>(v[0]);
+    const auto& p = reg.get<PostProcessSettings>(*v.begin());
     m_settings.hdr = p.hdr;
     m_settings.bloom = p.bloom;
     m_settings.bloomThreshold = p.bloomThreshold;
@@ -71,46 +80,53 @@ void RenderPipeline::endFrame(){
         glDisable(GL_DEPTH_TEST);
         PostProcess::BloomExtract(m_hdr.colorTexture(), m_bloomExtract.fbo(), m_settings.bloomThreshold);
         // 2. blur ping-pong
-        // ping -> pong
+        float halfW = static_cast<float>(m_w) * 0.5f;
+        float halfH = static_cast<float>(m_h) * 0.5f;
+        glm::vec2 blurH(1.0f / halfW, 0.0f);
+        glm::vec2 blurV(0.0f, 1.0f / halfH);
         m_bloomPing.bind();
-        PostProcess::Blur(m_bloomExtract.colorTexture(), m_bloomPing.fbo(), glm::vec2(1.0f/(m_w/2), 0));
+        PostProcess::Blur(m_bloomExtract.colorTexture(), m_bloomPing.fbo(), blurH);
         m_bloomPong.bind();
-        PostProcess::Blur(m_bloomPing.colorTexture(), m_bloomPong.fbo(), glm::vec2(0, 1.0f/(m_h/2)));
+        PostProcess::Blur(m_bloomPing.colorTexture(), m_bloomPong.fbo(), blurV);
         // extra passes
         for(int i=1;i<m_settings.bloomBlurPasses;++i){
             m_bloomPing.bind();
-            PostProcess::Blur(m_bloomPong.colorTexture(), m_bloomPing.fbo(), glm::vec2(1.0f/(m_w/2),0));
+            PostProcess::Blur(m_bloomPong.colorTexture(), m_bloomPing.fbo(), blurH);
             m_bloomPong.bind();
-            PostProcess::Blur(m_bloomPing.colorTexture(), m_bloomPong.fbo(), glm::vec2(0,1.0f/(m_h/2)));
+            PostProcess::Blur(m_bloomPing.colorTexture(), m_bloomPong.fbo(), blurV);
         }
         bloomTex = m_bloomPong.colorTexture();
     }
 
-    // 3. composite (scene + bloom) -> composite FBO (full res) для FXAA, или сразу в default если FXAA off
-    if(m_settings.fxaa){
-        m_composite.bind();
-        glDisable(GL_DEPTH_TEST);
-        if(m_settings.bloom){
-            PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
-        } else {
-            // без bloom — просто blit HDR с vignette
-            PostProcess::Composite(m_hdr.colorTexture(), m_hdr.colorTexture(), 0.0f, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
-        }
-        // 4. FXAA -> default
-        glBindFramebuffer(GL_FRAMEBUFFER,0);
-        glViewport(0,0,m_w,m_h);
-        glDisable(GL_DEPTH_TEST);
-        PostProcess::FXAA(m_composite.colorTexture());
+    // 3. composite (scene + bloom) -> composite FBO
+    m_composite.bind();
+    glDisable(GL_DEPTH_TEST);
+    if (m_settings.bloom) {
+        PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
     } else {
-        // без FXAA — composite сразу в default
-        glBindFramebuffer(GL_FRAMEBUFFER,0);
-        glViewport(0,0,m_w,m_h);
-        if(m_settings.bloom){
-            PostProcess::Composite(m_hdr.colorTexture(), bloomTex, m_settings.bloomIntensity, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
-        } else {
-            // просто blit HDR
-            m_hdr.blitToDefault();
-        }
+        PostProcess::Composite(m_hdr.colorTexture(), m_hdr.colorTexture(), 0.0f, m_settings.vignette, m_settings.exposure, m_settings.gamma, 1.06f);
     }
+
+    // 4. TAA Temporal Accumulation Pass (Full resolution)
+    int currentHistory = m_taaIndex;
+    int prevHistory = 1 - m_taaIndex;
+    
+    glm::mat4 invVP = glm::inverse(m_currentViewProj);
+    PostProcess::TAA(m_composite.colorTexture(), m_hdr.depthTexture(), m_taaHistory[prevHistory].colorTexture(),
+                     m_taaHistory[currentHistory].fbo(), invVP, m_prevViewProj, 0.90f);
+
+    // 5. Output to default framebuffer
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, m_w, m_h);
+    glDisable(GL_DEPTH_TEST);
+
+    if (m_settings.fxaa) {
+        PostProcess::FXAA(m_taaHistory[currentHistory].colorTexture());
+    } else {
+        PostProcess::Composite(m_taaHistory[currentHistory].colorTexture(), m_taaHistory[currentHistory].colorTexture(), 0.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    m_taaIndex = 1 - m_taaIndex;
+    m_frameIndex++;
     glEnable(GL_DEPTH_TEST);
 }

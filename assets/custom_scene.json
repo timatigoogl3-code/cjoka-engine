@@ -1,0 +1,436 @@
+{
+  "atmosphere": {
+    "sky": {
+      "top": [0.15, 0.18, 0.45],
+      "horizon": [0.92, 0.45, 0.2],
+      "bottom": [0.95, 0.75, 0.4],
+      "exposure": 1.15
+    },
+    "fog": {
+      "color": [0.2, 0.22, 0.28],
+      "density": 0.0035
+    },
+    "sun": {
+      "dir": [-0.423999, -0.847998, -0.317999],
+      "color": [1, 0.92, 0.82],
+      "intensity": 2.5
+    },
+    "ambient": {
+      "color": [0.12, 0.14, 0.18],
+      "intensity": 1
+    },
+    "post": {
+      "bloomThreshold": 0.9,
+      "bloomIntensity": 0.55,
+      "exposure": 1.05,
+      "vignette": 0.34
+    }
+  },
+  "entities": [
+    {
+      "name": "PoliceCruiser",
+      "pos": [1.86057, 0.0969118, -4.07939],
+      "rot": [0, -0, 0],
+      "scale": [1.4, 1.4, 1.4],
+      "mesh": {
+        "assetPath": "assets/models/cars/police.obj",
+        "texturePath": "assets/textures/colormap.png",
+        "albedo": [1, 1, 1],
+        "metallic": 0.2,
+        "roughness": 0.6,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-5, 2.5, -8.66025],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [0.803848, 5.43448, 11.6668],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.0669873, 0.452873, 0.972237],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "ExhibitionPodium",
+      "pos": [3.63181, 0.15, -1.41426],
+      "rot": [0, -68.7236, 0],
+      "scale": [24, 0.3, 24],
+      "mesh": {
+        "assetPath": "",
+        "texturePath": "",
+        "albedo": [0.2, 0.22, 0.25],
+        "metallic": 0.8,
+        "roughness": 0.2,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [8.66026, 2.5, -5],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [3, 11.9733, 4.02847],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.25, 0.997774, 0.335706],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [1.19249e-07, 2.5, -10],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [0, 8.49688, 9.92186],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0, 0.708073, 0.826822],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [5, 2.5, -8.66025],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [0.803848, 10.8903, 7.12602],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.0669873, 0.907521, 0.593835],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "Barrel_1",
+      "pos": [-8, 0.87365, 6],
+      "rot": [0, 0, 0],
+      "scale": [1.2, 1.2, 1.2],
+      "mesh": {
+        "assetPath": "assets/models/barrel.obj",
+        "texturePath": "assets/textures/barrel.png",
+        "albedo": [1, 1, 1],
+        "metallic": 0.2,
+        "roughness": 0.6,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "Barrel_2",
+      "pos": [-6.88878, 0.854013, 6.59518],
+      "rot": [0, 0, 0],
+      "scale": [1.2, 1.2, 1.2],
+      "mesh": {
+        "assetPath": "assets/models/barrel.obj",
+        "texturePath": "assets/textures/barrel.png",
+        "albedo": [1, 1, 1],
+        "metallic": 0.2,
+        "roughness": 0.6,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "Plant_1",
+      "pos": [8, 0.3, 6],
+      "rot": [0, 0, 0],
+      "scale": [0.25, 0.25, 0.25],
+      "mesh": {
+        "assetPath": "assets/models/indoor_plant.obj",
+        "texturePath": "assets/textures/indoor_plant_COL.jpg",
+        "albedo": [1, 1, 1],
+        "metallic": 0.2,
+        "roughness": 0.6,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "Bench_1",
+      "pos": [-2.98023e-08, 1.42591, 6.98435],
+      "rot": [0, 0, 0],
+      "scale": [1.3, 1.3, 1.3],
+      "mesh": {
+        "assetPath": "assets/models/bench.obj",
+        "texturePath": "",
+        "albedo": [1, 1, 1],
+        "metallic": 0.2,
+        "roughness": 0.6,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [10, 2.5, 0],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [6, 11.4558, 1.45919],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.5, 0.954649, 0.121599],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [8.66025, 2.5, 5],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [9, 9.47641, 0.106608],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.75, 0.789701, 0.00888401],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [5, 2.5, 8.66025],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [11.1962, 6.56552, 0.33316],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.933013, 0.547127, 0.0277633],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-4.37114e-07, 2.5, 10],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [12, 3.50312, 2.07814],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [1, 0.291927, 0.173178],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-5, 2.5, 8.66025],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [11.1962, 1.10975, 4.87398],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.933013, 0.0924788, 0.406165],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-8.66025, 2.5, 5],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [9, 0.0267116, 7.97153],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.75, 0.00222597, 0.664294],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-10, 2.5, -8.74228e-07],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [6, 0.544217, 10.5408],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.5, 0.0453514, 0.878401],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-8.66025, 2.5, -5],
+      "rot": [0, 0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [3, 2.52359, 11.8934],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.25, 0.210299, 0.991116],
+        "intensity": 6,
+        "range": 15
+      }
+    },
+    {
+      "name": "Plane",
+      "pos": [-6.61562, -1.35063, 3.50043],
+      "rot": [0, -0, 0],
+      "scale": [68.9, 0.000689, 68.9],
+      "mesh": {
+        "assetPath": "",
+        "texturePath": "",
+        "albedo": [0.9, 0.9, 0.9],
+        "metallic": 0.8,
+        "roughness": 0.1,
+        "ao": 1,
+        "emissive": [0, 0, 0],
+        "clusterLOD": false,
+        "castShadow": true
+      }
+    },
+    {
+      "name": "PointLight",
+      "pos": [-2.00268, 7.54777, -13.7837],
+      "rot": [0, -0, 0],
+      "scale": [0.2, 0.2, 0.2],
+      "mesh": {
+        "assetPath": "primitive:sphere",
+        "texturePath": "",
+        "albedo": [0.05, 0.05, 0.05],
+        "metallic": 0,
+        "roughness": 0.5,
+        "ao": 1,
+        "emissive": [1.4, 14, 5.6],
+        "clusterLOD": false,
+        "castShadow": true
+      },
+      "light": {
+        "color": [0.1, 1, 0.4],
+        "intensity": 7,
+        "range": 18
+      }
+    }
+  ]
+}

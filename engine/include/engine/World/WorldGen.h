@@ -21,8 +21,8 @@ inline std::vector<Entity> Grid(Scene& scene, Factory f, int nx, int nz, float s
     std::uniform_real_distribution<float> j(-jitter, jitter);
     for (int x = 0; x < nx; ++x)
         for (int z = 0; z < nz; ++z) {
-            glm::vec3 p{origin.x + x*spacing + j(rng), origin.y, origin.z + z*spacing + j(rng)};
-            out.push_back(f(scene, p, float(rng()%360), int(out.size())));
+            glm::vec3 p{origin.x + static_cast<float>(x)*spacing + j(rng), origin.y, origin.z + static_cast<float>(z)*spacing + j(rng)};
+            out.push_back(f(scene, p, static_cast<float>(rng()%360), static_cast<int>(out.size())));
         }
     return out;
 }
@@ -31,7 +31,7 @@ inline std::vector<Entity> Grid(Scene& scene, Factory f, int nx, int nz, float s
 inline std::vector<Entity> Ring(Scene& scene, Factory f, int count, float radius, glm::vec3 center = {0,-0.9f,0}) {
     std::vector<Entity> out; out.reserve(size_t(count));
     for (int i = 0; i < count; ++i) {
-        float a = float(i)/float(count) * 6.2831853f;
+        float a = static_cast<float>(i)/static_cast<float>(count) * 6.2831853f;
         glm::vec3 p{center.x + std::cos(a)*radius, center.y, center.z + std::sin(a)*radius};
         out.push_back(f(scene, p, -glm::degrees(a)+90.0f, i));
     }
@@ -46,7 +46,8 @@ inline Entity Terrain(Scene& scene, int nx, int nz, float heightScale = 8.0f, fl
     std::mt19937 rng{42};
     for (int z = 0; z < nz; ++z)
         for (int x = 0; x < nx; ++x) {
-            float fx = float(x)/(nx-1), fz = float(z)/(nz-1);
+            float fx = static_cast<float>(x)/static_cast<float>(nx-1);
+            float fz = static_cast<float>(z)/static_cast<float>(nz-1);
             float h = std::sin(fx*6.28f)*std::cos(fz*4.5f)*heightScale*0.15f
                     + std::sin((fx+fz)*9.0f)*heightScale*0.05f;
             glm::vec3 pos{(fx-0.5f)*size, h - 1.0f, (fz-0.5f)*size};
@@ -65,9 +66,9 @@ inline Entity Terrain(Scene& scene, int nx, int nz, float heightScale = 8.0f, fl
     }
     for (auto& v : verts) v.normal = glm::normalize(v.normal);
     auto mesh = std::make_shared<Mesh3D>(std::move(verts), std::move(idx));
-    Entity e = scene.create("Terrain");
-    Material m; m.albedo = {1,1,1}; m.shininess = 8;
-    scene.registry().emplace<MeshRenderer>(e, MeshRenderer{mesh, m});
+    Entity e = scene.create("Terrain").id();
+    Material m = Material::Dielectric({1,1,1}, 0.8f);
+    scene.registry().emplace<MeshRenderer>(e, MeshRenderer(mesh, m));
     return e;
 }
 

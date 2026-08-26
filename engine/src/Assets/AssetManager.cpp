@@ -1,5 +1,6 @@
 #include "engine/Assets/AssetManager.h"
 #include "engine/Renderer/MeshLoader.h"
+#include "engine/Animation/FBXLoader.h"
 #include <unordered_map>
 #include <iostream>
 
@@ -33,6 +34,18 @@ std::shared_ptr<Mesh3D> Mesh(const std::string& path) {
     auto mesh = MeshLoader::LoadOBJ(path);
     s_meshCache[path] = mesh;
     return mesh;
+}
+
+static std::unordered_map<std::string, std::weak_ptr<Animation::SkinnedMesh>> s_skinnedCache;
+
+std::shared_ptr<Animation::SkinnedMesh> Skinned(const std::string& path) {
+    auto it = s_skinnedCache.find(path);
+    if (it != s_skinnedCache.end()) {
+        if (auto sp = it->second.lock()) return sp;
+    }
+    auto skinned = Animation::FBXLoader::LoadFBX(path);
+    s_skinnedCache[path] = skinned;
+    return skinned;
 }
 
 std::shared_ptr<Mesh3D> Cube(float s) {

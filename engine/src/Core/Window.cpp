@@ -31,23 +31,6 @@ Window::Window(int width, int height, const char* title)
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     // sRGB framebuffer если hdr pipeline не активен — оставляем linear для HDR
     // glEnable(GL_FRAMEBUFFER_SRGB); // HDR сам делает гамму
-    setupDropCallback();
-    std::cout << "[Window] drop .obj/.jpg сюда — быстрый спавн, TAB — браузер ассетов\n";
-}
-
-void Window::setupDropCallback(){
-    glfwSetWindowUserPointer(m_window, this);
-    glfwSetDropCallback(m_window, [](GLFWwindow* win, int count, const char** paths){
-        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(win));
-        if(!self) return;
-        for(int i=0;i<count;++i) self->m_drops.emplace_back(paths[i]);
-        std::cout << "[Window] dropped " << count << " file(s)\n";
-    });
-}
-std::vector<std::string> Window::pollDroppedFiles(){
-    auto out = m_drops;
-    m_drops.clear();
-    return out;
 }
 
 Window::~Window() {
