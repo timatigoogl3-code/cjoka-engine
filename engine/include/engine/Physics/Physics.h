@@ -105,13 +105,16 @@ public:
     // Создание вручную (без ECS) — для особых случаев
     void* CreateBoxActor(const glm::vec3& pos, const glm::vec3& halfExtents, bool dynamic, float density);
     void* CreateSphereActor(const glm::vec3& pos, float radius, bool dynamic, float density);
+    void* CreateCapsuleActor(const glm::vec3& pos, float radius, float height, bool dynamic, float density);
     void* CreateGroundPlane();
     void RemoveActor(void* actor);
+    void SetActorPose(void* actor, const glm::vec3& pos, const glm::vec3& rot = glm::vec3(0.0f));
 
     // Character Controller
     void* CreateCharacter(const glm::vec3& pos, float radius, float height);
     bool  MoveCharacter(void* cct, const glm::vec3& disp, float dt, glm::vec3& outPos);
     void  RemoveCharacter(void* cct);
+    void  SetCharacterPosition(void* cct, const glm::vec3& pos);
 
     // Рейкаст: вернёт entity hit или NullEntity; outPoint/outNormal
     Entity Raycast(Registry& reg, const glm::vec3& origin, const glm::vec3& dir, float maxDist,

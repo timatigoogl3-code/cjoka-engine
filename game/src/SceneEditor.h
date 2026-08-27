@@ -36,7 +36,10 @@ private:
     void renderGraphicsSettings();
     void renderClusterLODSettings();
     void renderSceneCameraGizmos();
+    void renderColliderGizmos();
     void renderPlayModeOverlay();
+    void syncTransformToPhysics(Entity e);
+    void propagateTransformDeltaToChildren(Entity parent, const glm::vec3& deltaPos, const glm::vec3& deltaRot);
     void buildStandaloneGame();
     void renderBuildModal();
 
@@ -86,6 +89,7 @@ private:
     bool m_showClusterLODSettings = false;
     bool m_showStats = false;
     bool m_showCameraPreview = true;
+    bool m_showColliders = true;
 
     // Asset Browser filesystem state
     std::filesystem::path m_currentDirectory = "assets";

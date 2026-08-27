@@ -741,6 +741,7 @@ void SceneEditor::onImGuiRender() {
     renderMenuBar();
     renderGizmo();
     renderSceneCameraGizmos();
+    if (m_showColliders) renderColliderGizmos();
 
     if (m_showHierarchy) renderHierarchy();
     if (m_showInspector) renderInspector();
@@ -830,6 +831,7 @@ void SceneEditor::renderMenuBar() {
                 m_showCameraPreview = false;
             }
             ImGui::Separator();
+            ImGui::MenuItem("Show 3D Colliders (Translucent)", nullptr, &m_showColliders);
             ImGui::MenuItem("Toggle Full Editor UI", "Tab", &m_showUI);
             ImGui::MenuItem("Invert Mouse Y-Axis", nullptr, &m_invertY);
             ImGui::EndMenu();
@@ -955,9 +957,14 @@ void SceneEditor::renderGizmo() {
     if (ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), op, mode, glm::value_ptr(model), nullptr, snap)) {
         float matrixTranslation[3], matrixRotation[3], matrixScale[3];
         ImGuizmo::DecomposeMatrixToComponents(glm::value_ptr(model), matrixTranslation, matrixRotation, matrixScale);
+        glm::vec3 oldPos = tr.position;
+        glm::vec3 oldRot = tr.rotation;
         tr.position = glm::vec3(matrixTranslation[0], matrixTranslation[1], matrixTranslation[2]);
         tr.rotation = glm::vec3(matrixRotation[0], matrixRotation[1], matrixRotation[2]);
         tr.scale    = glm::vec3(matrixScale[0], matrixScale[1], matrixScale[2]);
+
+        propagateTransformDeltaToChildren(m_selectedEntity, tr.position - oldPos, tr.rotation - oldRot);
+        syncTransformToPhysics(m_selectedEntity);
     }
 }
 
@@ -1129,6 +1136,246 @@ void SceneEditor::renderSceneCameraGizmos() {
     }
 }
 
+void SceneEditor::propagateTransformDeltaToChildren(Entity parent, const glm::vec3& deltaPos, const glm::vec3& deltaRot) {
+    if (!registry().valid(parent)) return;
+    for (Entity child : registry().view<Transform, Hierarchy>()) {
+        if (registry().get<Hierarchy>(child).parent == parent) {
+            auto& tr = registry().get<Transform>(child);
+            tr.position += deltaPos;
+            tr.rotation += deltaRot;
+            syncTransformToPhysics(child);
+            propagateTransformDeltaToChildren(child, deltaPos, deltaRot);
+        }
+    }
+}
+
+void SceneEditor::syncTransformToPhysics(Entity e) {
+    if (!m_phys || !registry().valid(e) || !registry().has<Transform>(e)) return;
+    auto& tr = registry().get<Transform>(e);
+
+    if (registry().has<cjoka_phys::Rigidbody>(e)) {
+        auto& rb = registry().get<cjoka_phys::Rigidbody>(e);
+        if (rb.pxActor) {
+            m_phys->SetActorPose(rb.pxActor, tr.position, tr.rotation);
+        }
+    }
+
+    if (registry().has<CharacterController>(e)) {
+        auto& cc = registry().get<CharacterController>(e);
+        if (cc.pxController) {
+            m_phys->SetCharacterPosition(cc.pxController, tr.position);
+        }
+    }
+}
+
+void SceneEditor::renderColliderGizmos() {
+    int fbw, fbh; window().getFramebufferSize(fbw, fbh);
+    float aspect = float(fbw) / float(fbh ? fbh : 1);
+    float yawRad = glm::radians(m_camYaw);
+    float pitchRad = glm::radians(m_camPitch);
+    glm::vec3 front{
+        std::cos(yawRad) * std::cos(pitchRad),
+        std::sin(pitchRad),
+        std::sin(yawRad) * std::cos(pitchRad)
+    };
+    front = glm::normalize(front);
+    glm::mat4 view = glm::lookAt(m_camPos, m_camPos + front, glm::vec3(0, 1, 0));
+    glm::mat4 proj = glm::perspective(glm::radians(m_camFov), aspect, 0.1f, 2000.0f);
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+
+    auto worldToScreen = [&](const glm::vec3& p, ImVec2& outPt) -> bool {
+        glm::vec4 clip = proj * view * glm::vec4(p, 1.0f);
+        if (clip.w <= 0.05f) return false;
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        if (ndc.z < -1.0f || ndc.z > 1.0f) return false;
+        outPt.x = (ndc.x * 0.5f + 0.5f) * io.DisplaySize.x;
+        outPt.y = (1.0f - (ndc.y * 0.5f + 0.5f)) * io.DisplaySize.y;
+        return true;
+    };
+
+    // Draw parent-child connection lines (golden dotted/solid lines)
+    for (Entity e : registry().view<Transform, Hierarchy>()) {
+        Entity parent = registry().get<Hierarchy>(e).parent;
+        if (registry().valid(parent) && registry().has<Transform>(parent)) {
+            ImVec2 p0, p1;
+            if (worldToScreen(registry().get<Transform>(parent).position, p0) &&
+                worldToScreen(registry().get<Transform>(e).position, p1)) {
+                drawList->AddLine(p0, p1, IM_COL32(255, 215, 0, 180), 1.5f);
+            }
+        }
+    }
+
+    // Iterate over entities with colliders or character controllers
+    for (Entity e : registry().view<Transform>()) {
+        bool hasCol = registry().has<cjoka_phys::Collider>(e);
+        bool hasCC = registry().has<CharacterController>(e);
+        if (!hasCol && !hasCC) continue;
+
+        bool isSelected = (m_selectedEntity == e);
+        ImU32 fillCol = isSelected ? IM_COL32(40, 255, 120, 50) : IM_COL32(30, 220, 180, 25);
+        ImU32 wireCol = isSelected ? IM_COL32(60, 255, 140, 230) : IM_COL32(40, 220, 180, 130);
+        float lineThick = isSelected ? 2.0f : 1.0f;
+
+        auto& tr = registry().get<Transform>(e);
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, tr.position);
+        m = glm::rotate(m, glm::radians(tr.rotation.z), glm::vec3(0,0,1));
+        m = glm::rotate(m, glm::radians(tr.rotation.y), glm::vec3(0,1,0));
+        m = glm::rotate(m, glm::radians(tr.rotation.x), glm::vec3(1,0,0));
+
+        if (hasCol) {
+            auto& col = registry().get<cjoka_phys::Collider>(e);
+            if (col.type == cjoka_phys::ColliderType::Box) {
+                glm::vec3 h = col.halfExtents * tr.scale;
+                glm::vec3 c = col.centerOffset;
+                glm::vec3 pts[8] = {
+                    glm::vec3(m * glm::vec4(c + glm::vec3(-h.x, -h.y, -h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3( h.x, -h.y, -h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3( h.x,  h.y, -h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3(-h.x,  h.y, -h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3(-h.x, -h.y,  h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3( h.x, -h.y,  h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3( h.x,  h.y,  h.z), 1.0f)),
+                    glm::vec3(m * glm::vec4(c + glm::vec3(-h.x,  h.y,  h.z), 1.0f))
+                };
+                ImVec2 s[8];
+                bool allVis = true;
+                for (int i = 0; i < 8; ++i) {
+                    if (!worldToScreen(pts[i], s[i])) { allVis = false; break; }
+                }
+                if (allVis) {
+                    drawList->AddQuadFilled(s[4], s[5], s[6], s[7], fillCol);
+                    drawList->AddQuadFilled(s[0], s[1], s[2], s[3], fillCol);
+                    drawList->AddQuadFilled(s[0], s[4], s[7], s[3], fillCol);
+                    drawList->AddQuadFilled(s[1], s[5], s[6], s[2], fillCol);
+                    drawList->AddQuadFilled(s[3], s[2], s[6], s[7], fillCol);
+                    drawList->AddQuadFilled(s[0], s[1], s[5], s[4], fillCol);
+
+                    drawList->AddLine(s[0], s[1], wireCol, lineThick);
+                    drawList->AddLine(s[1], s[2], wireCol, lineThick);
+                    drawList->AddLine(s[2], s[3], wireCol, lineThick);
+                    drawList->AddLine(s[3], s[0], wireCol, lineThick);
+
+                    drawList->AddLine(s[4], s[5], wireCol, lineThick);
+                    drawList->AddLine(s[5], s[6], wireCol, lineThick);
+                    drawList->AddLine(s[6], s[7], wireCol, lineThick);
+                    drawList->AddLine(s[7], s[4], wireCol, lineThick);
+
+                    drawList->AddLine(s[0], s[4], wireCol, lineThick);
+                    drawList->AddLine(s[1], s[5], wireCol, lineThick);
+                    drawList->AddLine(s[2], s[6], wireCol, lineThick);
+                    drawList->AddLine(s[3], s[7], wireCol, lineThick);
+                }
+            } else if (col.type == cjoka_phys::ColliderType::Sphere) {
+                glm::vec3 cPos = glm::vec3(m * glm::vec4(col.centerOffset, 1.0f));
+                float r = col.radius * std::max({tr.scale.x, tr.scale.y, tr.scale.z});
+                const int numSegs = 24;
+                ImVec2 ringXZ[numSegs], ringXY[numSegs], ringYZ[numSegs];
+                bool okXZ = true, okXY = true, okYZ = true;
+                for (int i = 0; i < numSegs; ++i) {
+                    float a = (float(i) / float(numSegs)) * glm::two_pi<float>();
+                    glm::vec3 pXZ = cPos + glm::vec3(std::cos(a) * r, 0.0f, std::sin(a) * r);
+                    glm::vec3 pXY = cPos + glm::vec3(std::cos(a) * r, std::sin(a) * r, 0.0f);
+                    glm::vec3 pYZ = cPos + glm::vec3(0.0f, std::sin(a) * r, std::cos(a) * r);
+                    if (!worldToScreen(pXZ, ringXZ[i])) okXZ = false;
+                    if (!worldToScreen(pXY, ringXY[i])) okXY = false;
+                    if (!worldToScreen(pYZ, ringYZ[i])) okYZ = false;
+                }
+                if (okXZ) {
+                    for (int i = 0; i < numSegs; ++i) {
+                        drawList->AddLine(ringXZ[i], ringXZ[(i+1)%numSegs], wireCol, lineThick);
+                    }
+                }
+                if (okXY) {
+                    for (int i = 0; i < numSegs; ++i) {
+                        drawList->AddLine(ringXY[i], ringXY[(i+1)%numSegs], wireCol, lineThick);
+                    }
+                }
+                if (okYZ) {
+                    for (int i = 0; i < numSegs; ++i) {
+                        drawList->AddLine(ringYZ[i], ringYZ[(i+1)%numSegs], wireCol, lineThick);
+                    }
+                }
+                ImVec2 cScreen;
+                if (worldToScreen(cPos, cScreen)) {
+                    ImVec2 edgeScreen;
+                    if (worldToScreen(cPos + front * 0.01f + glm::vec3(r, 0, 0), edgeScreen)) {
+                        float sRad = std::hypot(edgeScreen.x - cScreen.x, edgeScreen.y - cScreen.y);
+                        if (sRad > 2.0f) {
+                            drawList->AddCircleFilled(cScreen, sRad, fillCol, 24);
+                        }
+                    }
+                }
+            } else if (col.type == cjoka_phys::ColliderType::Capsule) {
+                glm::vec3 cPos = glm::vec3(m * glm::vec4(col.centerOffset, 1.0f));
+                float r = col.radius * tr.scale.x;
+                float h = col.height * tr.scale.y;
+                float halfCyl = std::max(h * 0.5f - r, 0.01f);
+                glm::vec3 topC = cPos + glm::vec3(0, halfCyl, 0);
+                glm::vec3 botC = cPos - glm::vec3(0, halfCyl, 0);
+
+                const int numSegs = 20;
+                ImVec2 ringTop[numSegs], ringBot[numSegs];
+                bool okTop = true, okBot = true;
+                for (int i = 0; i < numSegs; ++i) {
+                    float a = (float(i) / float(numSegs)) * glm::two_pi<float>();
+                    glm::vec3 pTop = topC + glm::vec3(std::cos(a) * r, 0.0f, std::sin(a) * r);
+                    glm::vec3 pBot = botC + glm::vec3(std::cos(a) * r, 0.0f, std::sin(a) * r);
+                    if (!worldToScreen(pTop, ringTop[i])) okTop = false;
+                    if (!worldToScreen(pBot, ringBot[i])) okBot = false;
+                }
+                if (okTop && okBot) {
+                    for (int i = 0; i < numSegs; ++i) {
+                        drawList->AddLine(ringTop[i], ringTop[(i+1)%numSegs], wireCol, lineThick);
+                        drawList->AddLine(ringBot[i], ringBot[(i+1)%numSegs], wireCol, lineThick);
+                    }
+                    drawList->AddLine(ringTop[0], ringBot[0], wireCol, lineThick);
+                    drawList->AddLine(ringTop[numSegs/4], ringBot[numSegs/4], wireCol, lineThick);
+                    drawList->AddLine(ringTop[numSegs/2], ringBot[numSegs/2], wireCol, lineThick);
+                    drawList->AddLine(ringTop[3*numSegs/4], ringBot[3*numSegs/4], wireCol, lineThick);
+
+                    drawList->AddQuadFilled(ringTop[0], ringTop[numSegs/2], ringBot[numSegs/2], ringBot[0], fillCol);
+                }
+            }
+        }
+
+        if (hasCC) {
+            auto& cc = registry().get<CharacterController>(e);
+            glm::vec3 cPos = tr.position;
+            float r = cc.radius * tr.scale.x;
+            float h = cc.height * tr.scale.y;
+            float halfCyl = std::max(h * 0.5f - r, 0.01f);
+            glm::vec3 topC = cPos + glm::vec3(0, halfCyl, 0);
+            glm::vec3 botC = cPos - glm::vec3(0, halfCyl, 0);
+
+            const int numSegs = 20;
+            ImVec2 ringTop[numSegs], ringBot[numSegs];
+            bool okTop = true, okBot = true;
+            for (int i = 0; i < numSegs; ++i) {
+                float a = (float(i) / float(numSegs)) * glm::two_pi<float>();
+                glm::vec3 pTop = topC + glm::vec3(std::cos(a) * r, 0.0f, std::sin(a) * r);
+                glm::vec3 pBot = botC + glm::vec3(std::cos(a) * r, 0.0f, std::sin(a) * r);
+                if (!worldToScreen(pTop, ringTop[i])) okTop = false;
+                if (!worldToScreen(pBot, ringBot[i])) okBot = false;
+            }
+            if (okTop && okBot) {
+                for (int i = 0; i < numSegs; ++i) {
+                    drawList->AddLine(ringTop[i], ringTop[(i+1)%numSegs], wireCol, lineThick);
+                    drawList->AddLine(ringBot[i], ringBot[(i+1)%numSegs], wireCol, lineThick);
+                }
+                drawList->AddLine(ringTop[0], ringBot[0], wireCol, lineThick);
+                drawList->AddLine(ringTop[numSegs/4], ringBot[numSegs/4], wireCol, lineThick);
+                drawList->AddLine(ringTop[numSegs/2], ringBot[numSegs/2], wireCol, lineThick);
+                drawList->AddLine(ringTop[3*numSegs/4], ringBot[3*numSegs/4], wireCol, lineThick);
+
+                drawList->AddQuadFilled(ringTop[0], ringTop[numSegs/2], ringBot[numSegs/2], ringBot[0], fillCol);
+            }
+        }
+    }
+}
+
 void SceneEditor::renderHierarchy() {
     ImGui::SetNextWindowPos(ImVec2(16, 36), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 480), ImGuiCond_FirstUseEver);
@@ -1161,13 +1408,13 @@ void SceneEditor::renderHierarchy() {
         std::string filter = m_searchBuf;
         std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
 
-        for (Entity e : registry().view<Transform>()) {
+        auto drawEntityNode = [&](auto self, Entity e) -> void {
             std::string name = "Entity_" + std::to_string((uint32_t)e);
             if (registry().has<Name>(e)) name = registry().get<Name>(e).value;
 
             std::string lowerName = name;
             std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-            if (!filter.empty() && lowerName.find(filter) == std::string::npos) continue;
+            if (!filter.empty() && lowerName.find(filter) == std::string::npos) return;
 
             std::string tag = "[Obj] ";
             if (registry().has<Camera>(e)) tag = "[Cam] ";
@@ -1177,9 +1424,33 @@ void SceneEditor::renderHierarchy() {
             else if (registry().has<CharacterController>(e)) tag = "[Player] ";
             else if (registry().has<NativeScript>(e)) tag = "[Script] ";
 
+            std::vector<Entity> children;
+            for (Entity c : registry().view<Transform, Hierarchy>()) {
+                if (registry().get<Hierarchy>(c).parent == e) children.push_back(c);
+            }
+
             bool isSelected = (m_selectedEntity == e);
-            if (ImGui::Selectable((tag + name + "##" + std::to_string((uint32_t)e)).c_str(), isSelected)) {
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (isSelected) flags |= ImGuiTreeNodeFlags_Selected;
+            if (children.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+
+            bool opened = ImGui::TreeNodeEx((void*)(uintptr_t)e, flags, "%s%s", tag.c_str(), name.c_str());
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
                 m_selectedEntity = e;
+            }
+
+            if (opened) {
+                for (Entity c : children) {
+                    self(self, c);
+                }
+                ImGui::TreePop();
+            }
+        };
+
+        for (Entity e : registry().view<Transform>()) {
+            bool hasParent = registry().has<Hierarchy>(e) && registry().valid(registry().get<Hierarchy>(e).parent);
+            if (!hasParent) {
+                drawEntityNode(drawEntityNode, e);
             }
         }
         ImGui::EndChild();
@@ -1227,19 +1498,76 @@ void SceneEditor::renderInspector() {
         // 2. Transform Component
         if (registry().has<Transform>(e) && ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& tr = registry().get<Transform>(e);
-            ImGui::DragFloat3("Position", &tr.position.x, 0.05f);
-            ImGui::DragFloat3("Rotation", &tr.rotation.x, 0.5f);
-            ImGui::DragFloat3("Scale", &tr.scale.x, 0.02f, 0.001f, 100.0f);
+            glm::vec3 oldPos = tr.position;
+            glm::vec3 oldRot = tr.rotation;
+            bool changed = false;
+
+            if (ImGui::DragFloat3("Position", &tr.position.x, 0.05f)) changed = true;
+            if (ImGui::DragFloat3("Rotation", &tr.rotation.x, 0.5f)) changed = true;
+            if (ImGui::DragFloat3("Scale", &tr.scale.x, 0.02f, 0.001f, 100.0f)) changed = true;
             
             glm::vec3 fwd = tr.forward();
             glm::vec3 right = tr.right();
             ImGui::TextDisabled("Fwd: (%.2f, %.2f, %.2f) | Right: (%.2f, %.2f, %.2f)", fwd.x, fwd.y, fwd.z, right.x, right.y, right.z);
 
-            if (ImGui::Button("Reset Pos")) tr.position = {0,0,0};
+            if (ImGui::Button("Reset Pos")) { tr.position = {0,0,0}; changed = true; }
             ImGui::SameLine();
-            if (ImGui::Button("Reset Rot")) tr.rotation = {0,0,0};
+            if (ImGui::Button("Reset Rot")) { tr.rotation = {0,0,0}; changed = true; }
             ImGui::SameLine();
-            if (ImGui::Button("Reset Scale")) tr.scale = {1,1,1};
+            if (ImGui::Button("Reset Scale")) { tr.scale = {1,1,1}; changed = true; }
+
+            if (changed) {
+                propagateTransformDeltaToChildren(e, tr.position - oldPos, tr.rotation - oldRot);
+                syncTransformToPhysics(e);
+            }
+        }
+
+        // 2b. Hierarchy & Parenting (Наследование трансформа)
+        if (ImGui::CollapsingHeader("Hierarchy / Parenting (Наследование)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            Entity currentParent = NullEntity;
+            if (registry().has<Hierarchy>(e)) {
+                currentParent = registry().get<Hierarchy>(e).parent;
+            }
+
+            std::string parentName = "None (Root Entity)";
+            if (registry().valid(currentParent) && registry().has<Name>(currentParent)) {
+                parentName = registry().get<Name>(currentParent).value + " (#" + std::to_string((uint32_t)currentParent) + ")";
+            }
+
+            ImGui::Text("Parent: %s", parentName.c_str());
+            if (ImGui::BeginCombo("Select Parent Entity", parentName.c_str())) {
+                if (ImGui::Selectable("None (Root Entity)", !registry().valid(currentParent))) {
+                    if (registry().has<Hierarchy>(e)) {
+                        registry().remove<Hierarchy>(e);
+                    }
+                }
+                for (Entity other : registry().view<Transform>()) {
+                    if (other == e) continue;
+                    bool isDescendant = false;
+                    Entity check = other;
+                    while (registry().valid(check) && registry().has<Hierarchy>(check)) {
+                        check = registry().get<Hierarchy>(check).parent;
+                        if (check == e) { isDescendant = true; break; }
+                    }
+                    if (isDescendant) continue;
+
+                    std::string oName = "Entity_" + std::to_string((uint32_t)other);
+                    if (registry().has<Name>(other)) oName = registry().get<Name>(other).value;
+                    bool isSel = (currentParent == other);
+                    if (ImGui::Selectable((oName + "##parent_" + std::to_string((uint32_t)other)).c_str(), isSel)) {
+                        auto& h = registry().has<Hierarchy>(e) ? registry().get<Hierarchy>(e) : registry().emplace<Hierarchy>(e);
+                        h.parent = other;
+                    }
+                    if (isSel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (registry().valid(currentParent)) {
+                ImGui::SameLine();
+                if (ImGui::Button("Detach (Clear Parent)")) {
+                    registry().remove<Hierarchy>(e);
+                }
+            }
         }
 
         // 3. Camera Component
@@ -1426,17 +1754,18 @@ void SceneEditor::renderInspector() {
             int currentType = (int)col.type;
             if (ImGui::Combo("Collider Shape", &currentType, shapeTypes, IM_ARRAYSIZE(shapeTypes))) {
                 col.type = (cjoka_phys::ColliderType)currentType;
+                syncTransformToPhysics(e);
             }
             if (col.type == cjoka_phys::ColliderType::Box) {
-                ImGui::DragFloat3("Half Extents", &col.halfExtents.x, 0.05f, 0.01f, 100.0f);
+                if (ImGui::DragFloat3("Half Extents", &col.halfExtents.x, 0.05f, 0.01f, 100.0f)) syncTransformToPhysics(e);
             } else if (col.type == cjoka_phys::ColliderType::Sphere) {
-                ImGui::DragFloat("Radius", &col.radius, 0.05f, 0.01f, 100.0f);
+                if (ImGui::DragFloat("Radius", &col.radius, 0.05f, 0.01f, 100.0f)) syncTransformToPhysics(e);
             } else if (col.type == cjoka_phys::ColliderType::Capsule) {
-                ImGui::DragFloat("Capsule Radius", &col.radius, 0.05f, 0.01f, 50.0f);
-                ImGui::DragFloat("Capsule Height", &col.height, 0.05f, 0.01f, 50.0f);
+                if (ImGui::DragFloat("Capsule Radius", &col.radius, 0.05f, 0.01f, 50.0f)) syncTransformToPhysics(e);
+                if (ImGui::DragFloat("Capsule Height", &col.height, 0.05f, 0.01f, 50.0f)) syncTransformToPhysics(e);
             }
 
-            ImGui::DragFloat3("Center Offset", &col.centerOffset.x, 0.05f);
+            if (ImGui::DragFloat3("Center Offset", &col.centerOffset.x, 0.05f)) syncTransformToPhysics(e);
             ImGui::SliderFloat("Static Friction", &col.staticFriction, 0.0f, 1.5f);
             ImGui::SliderFloat("Dynamic Friction", &col.dynamicFriction, 0.0f, 1.5f);
             ImGui::SliderFloat("Restitution (Bounciness)", &col.restitution, 0.0f, 1.0f);
@@ -1451,8 +1780,8 @@ void SceneEditor::renderInspector() {
         // 10. Character Controller Component
         if (registry().has<CharacterController>(e) && ImGui::CollapsingHeader("Character Controller Component", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& cc = registry().get<CharacterController>(e);
-            ImGui::DragFloat("Radius", &cc.radius, 0.02f, 0.1f, 5.0f);
-            ImGui::DragFloat("Height", &cc.height, 0.05f, 0.1f, 10.0f);
+            if (ImGui::DragFloat("Radius", &cc.radius, 0.02f, 0.1f, 5.0f)) syncTransformToPhysics(e);
+            if (ImGui::DragFloat("Height", &cc.height, 0.05f, 0.1f, 10.0f)) syncTransformToPhysics(e);
             ImGui::DragFloat("Walk Speed", &cc.speed, 0.1f, 0.0f, 50.0f);
             ImGui::DragFloat("Jump Force", &cc.jumpForce, 0.1f, 0.0f, 30.0f);
             ImGui::Text("Grounded: %s | Vel Y: %.2f", cc.onGround ? "YES" : "NO", cc.velocity.y);
@@ -1460,6 +1789,35 @@ void SceneEditor::renderInspector() {
             ImGui::Separator();
             if (ImGui::Button("Remove Character Controller")) {
                 registry().remove<CharacterController>(e);
+            }
+        }
+
+        // 10b. C++ Native Script Component
+        if (registry().has<NativeScript>(e) && ImGui::CollapsingHeader("C++ Game Script Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& ns = registry().get<NativeScript>(e);
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "[Attached Script] %s", ns.scriptName.c_str());
+
+            auto& allScripts = ScriptRegistry::Get().allScripts();
+            if (ImGui::BeginCombo("Change Script", ns.scriptName.c_str())) {
+                for (const auto& [name, factory] : allScripts) {
+                    bool isSel = (ns.scriptName == name);
+                    if (ImGui::Selectable(name.c_str(), isSel)) {
+                        ns.scriptName = name;
+                        ns.instantiate = factory;
+                        ns.instance = factory();
+                        if (ns.instance) {
+                            ns.instance->_init(e, &registry());
+                            ns.instance->onCreate();
+                        }
+                    }
+                    if (isSel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Script Component")) {
+                registry().remove<NativeScript>(e);
             }
         }
 
@@ -2376,6 +2734,24 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
             file << "      }";
         }
 
+        if (registry().has<Hierarchy>(e)) {
+            auto& h = registry().get<Hierarchy>(e);
+            if (registry().valid(h.parent) && registry().has<Name>(h.parent)) {
+                file << ",\n      \"parent\": \"" << registry().get<Name>(h.parent).value << "\"";
+            }
+        }
+
+        if (registry().has<cjoka_phys::Collider>(e)) {
+            auto& col = registry().get<cjoka_phys::Collider>(e);
+            file << ",\n      \"collider\": {\n";
+            file << "        \"type\": " << (int)col.type << ",\n";
+            file << "        \"halfExtents\": [" << col.halfExtents.x << ", " << col.halfExtents.y << ", " << col.halfExtents.z << "],\n";
+            file << "        \"radius\": " << col.radius << ",\n";
+            file << "        \"height\": " << col.height << ",\n";
+            file << "        \"offset\": [" << col.centerOffset.x << ", " << col.centerOffset.y << ", " << col.centerOffset.z << "]\n";
+            file << "      }";
+        }
+
         if (registry().has<NativeScript>(e)) {
             auto& ns = registry().get<NativeScript>(e);
             file << ",\n      \"script\": {\n";
@@ -2444,6 +2820,15 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
     float ccHeight = 1.8f;
     float ccSpeed = 8.0f;
     float ccJump = 5.0f;
+
+    bool hasCol = false;
+    int colType = 0;
+    glm::vec3 colHalfExtents{0.5f};
+    float colRadius = 0.5f;
+    float colHeight = 1.0f;
+    glm::vec3 colOffset{0.0f};
+    std::string parentName = "";
+    std::vector<std::pair<Entity, std::string>> pendingParents;
 
     auto instantiateEntity = [&]() {
         if (currentName.empty() && !hasTransform) return;
@@ -2523,6 +2908,21 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             cc.jumpForce = ccJump;
         }
 
+        // 6. PhysX Collider
+        if (hasCol) {
+            auto& col = ref.add<cjoka_phys::Collider>();
+            col.type = (cjoka_phys::ColliderType)colType;
+            col.halfExtents = colHalfExtents;
+            col.radius = colRadius;
+            col.height = colHeight;
+            col.centerOffset = colOffset;
+        }
+
+        // 7. Hierarchy / Parent
+        if (!parentName.empty()) {
+            pendingParents.push_back({e, parentName});
+        }
+
         // Reset state
         currentName = "";
         hasTransform = false;
@@ -2548,6 +2948,13 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
         ccHeight = 1.8f;
         ccSpeed = 8.0f;
         ccJump = 5.0f;
+        hasCol = false;
+        colType = 0;
+        colHalfExtents = glm::vec3(0.5f);
+        colRadius = 0.5f;
+        colHeight = 1.0f;
+        colOffset = glm::vec3(0.0f);
+        parentName = "";
     };
 
     while (std::getline(file, line)) {
@@ -2618,6 +3025,22 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             sscanf(line.c_str(), "%*[^:]: %f", &ccSpeed);
         } else if (line.find("\"jumpForce\":") != std::string::npos && hasCC) {
             sscanf(line.c_str(), "%*[^:]: %f", &ccJump);
+        } else if (line.find("\"collider\":") != std::string::npos) {
+            hasCol = true;
+        } else if (line.find("\"type\":") != std::string::npos && hasCol) {
+            sscanf(line.c_str(), "%*[^:]: %d", &colType);
+        } else if (line.find("\"halfExtents\":") != std::string::npos && hasCol) {
+            sscanf(line.c_str(), "%*[^[][%f, %f, %f", &colHalfExtents.x, &colHalfExtents.y, &colHalfExtents.z);
+        } else if (line.find("\"radius\":") != std::string::npos && hasCol) {
+            sscanf(line.c_str(), "%*[^:]: %f", &colRadius);
+        } else if (line.find("\"height\":") != std::string::npos && hasCol) {
+            sscanf(line.c_str(), "%*[^:]: %f", &colHeight);
+        } else if (line.find("\"offset\":") != std::string::npos && hasCol) {
+            sscanf(line.c_str(), "%*[^[][%f, %f, %f", &colOffset.x, &colOffset.y, &colOffset.z);
+        } else if (line.find("\"parent\":") != std::string::npos) {
+            size_t start = line.find("\"", line.find(":") + 1) + 1;
+            size_t end = line.find("\"", start);
+            parentName = line.substr(start, end - start);
         } else if (line.find("\"script\":") != std::string::npos) {
             hasScript = true;
         } else if (line.find("\"name\":") != std::string::npos && hasScript) {
@@ -2627,6 +3050,17 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
         }
     }
     instantiateEntity();
+
+    // Resolve parent-child relationships
+    for (auto& [child, pName] : pendingParents) {
+        for (Entity p : registry().view<Name>()) {
+            if (registry().get<Name>(p).value == pName && p != child) {
+                auto& h = registry().has<Hierarchy>(child) ? registry().get<Hierarchy>(child) : registry().emplace<Hierarchy>(child);
+                h.parent = p;
+                break;
+            }
+        }
+    }
 
     // Ensure at least one game camera exists
     bool foundCam = false;

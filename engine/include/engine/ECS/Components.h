@@ -1,12 +1,15 @@
 #pragma once
 #include <memory>
 #include <string>
+#include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include "engine/Renderer/Mesh3D.h"
 #include "engine/Renderer/MeshClusters.h"
 #include "engine/Renderer/Texture.h"
+
+#include "engine/ECS/Registry.h"
 
 // ---------- Transform ----------
 struct Transform {
@@ -59,6 +62,11 @@ struct Transform {
 };
 
 struct Name { std::string value; };
+
+// ---------- Hierarchy & Parenting ----------
+struct Hierarchy {
+    Entity parent = NullEntity;
+};
 
 // ---------- Material (PBR Cook-Torrance) ----------
 struct Material {

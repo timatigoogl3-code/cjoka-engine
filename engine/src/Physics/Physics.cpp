@@ -184,6 +184,37 @@ void* World::CreateSphereActor(const glm::vec3& pos, float r, bool dyn, float de
     m_impl->actors.push_back(a);
     return a;
 }
+void* World::CreateCapsuleActor(const glm::vec3& pos, float r, float h, bool dyn, float density) {
+    float halfHeight = std::max(h * 0.5f - r, 0.01f);
+    PxCapsuleGeometry geo(r, halfHeight);
+    PxTransform t(PxVec3(pos.x,pos.y,pos.z));
+    PxRigidActor* a;
+    if (dyn) {
+        auto* d = PxCreateDynamic(*s_physics, t, geo, *m_impl->defaultMat, density);
+        Rigidbody defaultRb; defaultRb.density = density;
+        SetupDynamic(d, {r, halfHeight, r}, defaultRb);
+        a = d;
+    } else a = PxCreateStatic(*s_physics, t, geo, *m_impl->defaultMat);
+    m_impl->scene->addActor(*a);
+    m_impl->actors.push_back(a);
+    return a;
+}
+
+void World::SetActorPose(void* actor, const glm::vec3& pos, const glm::vec3& rot) {
+    if (!actor) return;
+    auto* a = static_cast<PxRigidActor*>(actor);
+    PxTransform pose(PxVec3(pos.x, pos.y, pos.z));
+    glm::quat q = glm::quat(glm::radians(rot));
+    pose.q = PxQuat(q.x, q.y, q.z, q.w);
+    a->setGlobalPose(pose);
+}
+
+void World::SetCharacterPosition(void* cct, const glm::vec3& pos) {
+    if (!cct) return;
+    auto* ctrl = static_cast<PxController*>(cct);
+    ctrl->setPosition(PxExtendedVec3(pos.x, pos.y, pos.z));
+}
+
 void* World::CreateGroundPlane() {
     PxRigidStatic* ground = PxCreatePlane(*s_physics, PxPlane(0,1,0,0), *m_impl->defaultMat);
     m_impl->scene->addActor(*ground);
@@ -268,17 +299,24 @@ void World::PushAt(const glm::vec3& origin, const glm::vec3& dir, float maxDist,
 
 void World::BuildActors(Registry& reg) {
     m_reg = &reg;
-    for (Entity e : reg.view<Transform, MeshRenderer, Rigidbody>()) {
+    // 1. Entities with Rigidbody
+    for (Entity e : reg.view<Transform, Rigidbody>()) {
         auto& rb = reg.get<Rigidbody>(e);
-        if (rb.pxActor) continue; // уже создан
         auto& tr = reg.get<Transform>(e);
-        bool dyn = rb.kind == Rigidbody::Kind::Dynamic;
+        bool dyn = (rb.kind == Rigidbody::Kind::Dynamic);
+        if (rb.pxActor) {
+            SetActorPose(rb.pxActor, tr.position, tr.rotation);
+            continue;
+        }
         void* actor = nullptr;
         if (auto* col = reg.try_get<Collider>(e)) {
+            glm::vec3 cPos = tr.position + col->centerOffset;
             if (col->type == ColliderType::Sphere)
-                actor = CreateSphereActor(tr.position, col->radius, dyn, rb.density);
+                actor = CreateSphereActor(cPos, col->radius, dyn, rb.density);
+            else if (col->type == ColliderType::Capsule)
+                actor = CreateCapsuleActor(cPos, col->radius, col->height, dyn, rb.density);
             else
-                actor = CreateBoxActor(tr.position, col->halfExtents, dyn, rb.density);
+                actor = CreateBoxActor(cPos, col->halfExtents * tr.scale, dyn, rb.density);
         } else {
             actor = CreateBoxActor(tr.position, tr.scale * 0.5f, dyn, rb.density);
         }
@@ -288,6 +326,25 @@ void World::BuildActors(Registry& reg) {
             if (dyn) {
                 SetupDynamic(static_cast<PxRigidDynamic*>(actor), tr.scale * 0.5f, rb);
             }
+        }
+    }
+
+    // 2. Entities with Collider but without Rigidbody (Static World Colliders)
+    for (Entity e : reg.view<Transform, Collider>()) {
+        if (reg.has<Rigidbody>(e)) continue; // Handled above
+        auto& col = reg.get<Collider>(e);
+        auto& tr = reg.get<Transform>(e);
+        glm::vec3 cPos = tr.position + col.centerOffset;
+        void* actor = nullptr;
+        if (col.type == ColliderType::Sphere)
+            actor = CreateSphereActor(cPos, col.radius, false, 1.0f);
+        else if (col.type == ColliderType::Capsule)
+            actor = CreateCapsuleActor(cPos, col.radius, col.height, false, 1.0f);
+        else
+            actor = CreateBoxActor(cPos, col.halfExtents * tr.scale, false, 1.0f);
+        if (actor) {
+            static_cast<PxRigidActor*>(actor)->userData = (void*)(uintptr_t)e;
+            SetActorPose(actor, cPos, tr.rotation);
         }
     }
 }
