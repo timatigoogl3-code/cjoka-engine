@@ -25,18 +25,30 @@ struct Frustum {
     Plane farFace;
     Plane nearFace;
 
-    // AABB intersection check
+    // AABB intersection check with small margin to prevent popping at frustum edges
     bool isOnFrustum(const glm::vec3& minExtents, const glm::vec3& maxExtents, const glm::mat4& transform) const {
+        // If object is large (e.g. ground plane, road, building), always keep visible to prevent pitch culling
+        float scaleX = glm::length(glm::vec3(transform[0]));
+        float scaleY = glm::length(glm::vec3(transform[1]));
+        float scaleZ = glm::length(glm::vec3(transform[2]));
+        float maxDim = std::max({ scaleX, scaleY, scaleZ });
+        if (maxDim > 20.0f) return true;
+
+        // Expand AABB by margin to prevent objects from flickering at frustum edges
+        constexpr float kMargin = 0.5f;
+        glm::vec3 lo = minExtents - glm::vec3(kMargin);
+        glm::vec3 hi = maxExtents + glm::vec3(kMargin);
+
         // Transform the 8 corners of the AABB
         glm::vec3 corners[8] = {
-            glm::vec3(transform * glm::vec4(minExtents.x, minExtents.y, minExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(maxExtents.x, minExtents.y, minExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(minExtents.x, maxExtents.y, minExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(maxExtents.x, maxExtents.y, minExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(minExtents.x, minExtents.y, maxExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(maxExtents.x, minExtents.y, maxExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(minExtents.x, maxExtents.y, maxExtents.z, 1.0f)),
-            glm::vec3(transform * glm::vec4(maxExtents.x, maxExtents.y, maxExtents.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(lo.x, lo.y, lo.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(hi.x, lo.y, lo.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(lo.x, hi.y, lo.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(hi.x, hi.y, lo.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(lo.x, lo.y, hi.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(hi.x, lo.y, hi.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(lo.x, hi.y, hi.z, 1.0f)),
+            glm::vec3(transform * glm::vec4(hi.x, hi.y, hi.z, 1.0f)),
         };
 
         const Plane* planes[] = { &leftFace, &rightFace, &topFace, &bottomFace, &nearFace, &farFace };

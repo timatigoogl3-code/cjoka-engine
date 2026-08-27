@@ -25,6 +25,7 @@ void Batcher::submit(const Transform& tr, const MeshRenderer& mr) {
     }
     InstanceData inst;
     inst.model = tr.matrix();
+    inst.prevModel = tr.prevMatrix;
     inst.albedo = glm::vec4(mr.material.albedo, mr.material.roughness);
     inst.emissive = glm::vec4(mr.material.emissive, mr.material.metallic);
     it->second.instances.push_back(inst);
@@ -36,7 +37,7 @@ size_t Batcher::totalInstances() const {
     return n;
 }
 
-void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow) {
+void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow, const glm::mat4& prevViewProj) {
     if (m_batches.empty()) return;
     static Shader* instanced = nullptr;
     if (!instanced) instanced = new Shader(DefaultShaders::kLitInstancedVS, DefaultShaders::kLitInstancedFS);
@@ -45,6 +46,7 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
     instanced->setMat4("uView", view);
     instanced->setMat4("uProj", proj);
     instanced->setVec3("uViewPos", viewPos);
+    instanced->setMat4("uPrevViewProj", prevViewProj);
 
     // Fog / Sky
     glm::vec3 fogCol{0.12f, 0.14f, 0.18f};

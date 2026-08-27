@@ -1,6 +1,7 @@
 #include "engine/Renderer/Skybox.h"
 #include "engine/Renderer/Shader.h"
 #include "engine/Renderer/DefaultShaders.h"
+#include "engine/Renderer/DepthState.h"
 #include "engine/Renderer/Texture.h"
 #include "stb/stb_image.h"
 #include <iostream>
@@ -70,7 +71,7 @@ void Skybox::draw(const glm::mat4& view, const glm::mat4& proj) const {
     s_skyShader->setFloat("uTime", 0.0f);
     if (m_cubemap) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_cubemap); s_skyShader->setInt("uHDR",0); }
     glBindVertexArray(m_vao); glDrawElements(GL_TRIANGLES,36,GL_UNSIGNED_INT,0); glBindVertexArray(0);
-    glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE); glDepthFunc(DepthState::kFunc);
 }
 
 void Skybox::DrawProcedural(const glm::mat4& view, const glm::mat4& proj, float time) {
@@ -87,5 +88,5 @@ void Skybox::DrawProcedural(const glm::mat4& view, const glm::mat4& proj, float 
     s_skyShader->setVec3("uBottomColor", glm::vec3(0.85f,0.88f,0.92f));
     s_skyShader->setFloat("uTime", time);
     glBindVertexArray(proc.m_vao); glDrawElements(GL_TRIANGLES,36,GL_UNSIGNED_INT,0); glBindVertexArray(0);
-    glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE); glDepthFunc(DepthState::kFunc);
 }

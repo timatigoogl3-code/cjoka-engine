@@ -12,6 +12,7 @@
 #include "engine/Core/Window.h"
 #include "engine/Math/Frustum.h"
 #include "engine/Renderer/ForwardPlus.h"
+#include "engine/Renderer/Decal.h"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -81,7 +82,7 @@ inline void AnimationUpdate(Registry& reg, float dt) {
     }
 }
 
-inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow = nullptr, float screenW = 1280.0f, float screenH = 720.0f) {
+inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow = nullptr, float screenW = 1280.0f, float screenH = 720.0f, const glm::mat4& prevViewProj = glm::mat4(1.0f)) {
     // --- Instanced cluster shader (lazy init) ---
     static Shader* clusterShader = nullptr;
     if (!clusterShader) clusterShader = new Shader(DefaultShaders::kClusterInstancedVS, DefaultShaders::kLitFS);
@@ -99,6 +100,7 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
         sh.use();
         sh.setVec3("uViewPos", viewPos);
         sh.setFloat("uTime", static_cast<float>(glfwGetTime()));
+        sh.setMat4("uPrevViewProj", prevViewProj);
         if (auto v = reg.view<AmbientLight>(); v.begin() != v.end()) {
             auto& a = reg.get<AmbientLight>(*v.begin());
             sh.setVec3("uAmbientColor", a.color); sh.setFloat("uAmbientIntensity", a.intensity);
@@ -151,7 +153,7 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
 
     struct ClusterGroup {
         const Material* material = nullptr;
-        std::vector<glm::mat4> models;
+        std::vector<InstanceData> instances;
     };
     std::unordered_map<ClusteredMesh*, ClusterGroup> clusterGroups;
     std::vector<Entity> nonClusterEntities;
@@ -187,11 +189,22 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
         if (hasCluster) {
             auto& grp = clusterGroups[mr.clusterMesh.get()];
             if (!grp.material) grp.material = &mr.material;
-            grp.models.push_back(model);
+            InstanceData inst;
+            inst.model = model;
+            inst.prevModel = tr.prevMatrix;
+            inst.albedo = glm::vec4(mr.material.albedo, mr.material.roughness);
+            inst.emissive = glm::vec4(mr.material.emissive, mr.material.metallic);
+            grp.instances.push_back(inst);
         } else if (mr.mesh && !mr.mesh->empty()) {
             nonClusterEntities.push_back(e);
         }
     }
+
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+
+    GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    glDrawBuffers(2, bufs);
 
     // 1. Instanced cluster draw
     if (!clusterGroups.empty()) {
@@ -215,12 +228,16 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
                 clusterShader->setBool("uUseDiffuseMap", true);
                 mat.diffuseMap->bind(0); clusterShader->setInt("uDiffuseMap", 0);
             } else clusterShader->setBool("uUseDiffuseMap", false);
+            if (mat.useNormalMap && mat.normalMap && mat.normalMap->valid()) {
+                clusterShader->setBool("uUseNormalMap", true);
+                mat.normalMap->bind(2); clusterShader->setInt("uNormalMap", 2);
+            } else clusterShader->setBool("uUseNormalMap", false);
             if (mat.useSpecularMap && mat.specularMap && mat.specularMap->valid()) {
                 clusterShader->setBool("uUseSpecularMap", true);
                 mat.specularMap->bind(1); clusterShader->setInt("uSpecularMap", 1);
             } else clusterShader->setBool("uUseSpecularMap", false);
 
-            mesh->DrawInstanced(grp.models.data(), (int)grp.models.size(),
+            mesh->DrawInstanced(grp.instances.data(), (int)grp.instances.size(),
                                 viewPos, vp, fovYrad, screenH, cluster_lod::thresholdPx);
         }
     }
@@ -242,6 +259,7 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
             skinnedShader->setMat4("uMVP", proj * view * model);
             skinnedShader->setMat4("uModel", model);
             skinnedShader->setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
+            skinnedShader->setMat4("uPrevModel", tr.prevMatrix);
             skinnedShader->setVec3("uAlbedo", smr.material.albedo);
             skinnedShader->setFloat("uMetallic", smr.material.metallic);
             skinnedShader->setFloat("uRoughness", smr.material.roughness <= 0.02f ? 0.5f : smr.material.roughness);
@@ -285,14 +303,18 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
             shader.setMat4("uMVP", proj * view * model);
             shader.setMat4("uModel", model);
             shader.setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
+            shader.setMat4("uPrevModel", tr.prevMatrix);
             shader.setVec3("uAlbedo", mr.material.albedo);
             shader.setFloat("uMetallic", mr.material.metallic);
-            shader.setFloat("uRoughness", mr.material.roughness <= 0.02f ? 0.5f : mr.material.roughness);
+            shader.setFloat("uRoughness", std::max(mr.material.roughness, 0.04f));
             shader.setFloat("uAO", mr.material.ao);
             shader.setVec3("uEmissive", mr.material.emissive);
             if (mr.material.useDiffuseMap && mr.material.diffuseMap && mr.material.diffuseMap->valid()) {
                 shader.setBool("uUseDiffuseMap", true); mr.material.diffuseMap->bind(0); shader.setInt("uDiffuseMap", 0);
             } else shader.setBool("uUseDiffuseMap", false);
+            if (mr.material.useNormalMap && mr.material.normalMap && mr.material.normalMap->valid()) {
+                shader.setBool("uUseNormalMap", true); mr.material.normalMap->bind(2); shader.setInt("uNormalMap", 2);
+            } else shader.setBool("uUseNormalMap", false);
             if (mr.material.useSpecularMap && mr.material.specularMap && mr.material.specularMap->valid()) {
                 shader.setBool("uUseSpecularMap", true); mr.material.specularMap->bind(1); shader.setInt("uSpecularMap", 1);
             } else shader.setBool("uUseSpecularMap", false);
@@ -320,6 +342,8 @@ inline void DrawSky(const glm::mat4& view, const glm::mat4& proj, const Sky* sky
         glBindVertexArray(0); inited=true;
     }
     glDepthFunc(GL_LEQUAL); glDepthMask(GL_FALSE);
+    GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+    glDrawBuffers(2, bufs);
     skyShader->use();
     glm::mat4 vNoTrans = glm::mat4(glm::mat3(view));
     skyShader->setMat4("uView", vNoTrans); skyShader->setMat4("uProj", proj);
@@ -409,19 +433,12 @@ inline glm::mat4 SunLightMatrix(const glm::vec3& camPos, const DirectionalLight&
 }
 
 // ------------------------------------------------------------------
-// High-level Render — находит камеру, рисует sky + meshes (с батчингом если выгодно)
+// High-level RenderWithCamera — рендерит сцену с явной матрицей камеры view / proj / viewPos
 // ------------------------------------------------------------------
-inline void Render(Registry& reg, const Shader& shader, const Window& window) {
+inline void RenderWithCamera(Registry& reg, const Shader& shader, const Window& window, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, const glm::mat4& prevViewProj = glm::mat4(1.0f)) {
     int w,h; window.getFramebufferSize(w,h);
-    float aspect = static_cast<float>(w) / static_cast<float>(h ? h : 1);
-    Entity cam = NullEntity;
-    for (Entity e : reg.view<Camera, Transform>()) if (reg.get<Camera>(e).primary) { cam=e; break; }
-    if (cam==NullEntity) { auto v=reg.view<Camera, Transform>(); if(v.begin() != v.end()) cam=*v.begin(); }
-    glm::mat4 view(1), proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
-    glm::vec3 viewPos{0,0,5};
     Sky* skyPtr=nullptr;
     if (auto v = reg.view<Sky>(); v.begin() != v.end()) skyPtr=&reg.get<Sky>(*v.begin());
-    if (cam!=NullEntity) { auto& c=reg.get<Camera>(cam); auto& t=reg.get<Transform>(cam); view=Camera::viewFromTransform(t); proj=c.projection(aspect); viewPos=t.position; }
 
     NaniteAutoFill(reg);
 
@@ -446,33 +463,32 @@ inline void Render(Registry& reg, const Shader& shader, const Window& window) {
 
     DrawSky(view, proj, skyPtr);
 
-    // Динамический батчинг: если много одинаковых мешей — инстансим
-    auto viewTrMesh = reg.view<Transform, MeshRenderer>();
-    NaniteAutoFill(reg);
-    bool anyCluster = false;
-    for (Entity e : viewTrMesh) { if (NaniteActive(reg.get<MeshRenderer>(e))) { anyCluster = true; break; } }
-    if (!anyCluster && viewTrMesh.size_hint() > 6) {
-        Batcher batcher; batcher.begin();
-        Math::Frustum mainFrustum = Math::Frustum::createFrustumFromMatrix(proj * view);
-        for (Entity e : viewTrMesh) {
-            auto& mr = reg.get<MeshRenderer>(e);
-            if (!mr.mesh || mr.mesh->empty() || !mr.visible) continue;
-            auto& tr = reg.get<Transform>(e);
-            if (!mainFrustum.isOnFrustum(mr.mesh->minExtents(), mr.mesh->maxExtents(), tr.matrix())) continue;
-            batcher.submit(tr, mr);
-        }
-        if (batcher.batchCount() < viewTrMesh.size_hint() / 2) {
-            batcher.flush(reg, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr);
-            Renderer::DecalSystem::Render(reg, view, proj, 0);
-            return;
-        }
-    }
     bool hasLight = reg.count<DirectionalLight>()>0 || reg.count<PointLight>()>0;
-    if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr, (float)w, (float)h);
+    if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr, (float)w, (float)h, prevViewProj);
     else RenderUnlit(reg, shader, view, proj, viewPos);
 
     // Декали поверх геометрии сцены
     Renderer::DecalSystem::Render(reg, view, proj, 0);
+
+    // Update prevMatrix for all transforms (motion vectors for next frame)
+    for (Entity e : reg.view<Transform>()) {
+        reg.get<Transform>(e).updatePrevMatrix();
+    }
+}
+
+// ------------------------------------------------------------------
+// High-level Render — находит камеру в ECS и делегирует RenderWithCamera
+// ------------------------------------------------------------------
+inline void Render(Registry& reg, const Shader& shader, const Window& window, const glm::mat4& prevViewProj = glm::mat4(1.0f)) {
+    int w,h; window.getFramebufferSize(w,h);
+    float aspect = static_cast<float>(w) / static_cast<float>(h ? h : 1);
+    Entity cam = NullEntity;
+    for (Entity e : reg.view<Camera, Transform>()) if (reg.get<Camera>(e).primary) { cam=e; break; }
+    if (cam==NullEntity) { auto v=reg.view<Camera, Transform>(); if(v.begin() != v.end()) cam=*v.begin(); }
+    glm::mat4 view(1), proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+    glm::vec3 viewPos{0,0,5};
+    if (cam!=NullEntity) { auto& c=reg.get<Camera>(cam); auto& t=reg.get<Transform>(cam); view=Camera::viewFromTransform(t); proj=c.projection(aspect); viewPos=t.position; }
+    RenderWithCamera(reg, shader, window, view, proj, viewPos, prevViewProj);
 }
 
 // ------------------------------------------------------------------

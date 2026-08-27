@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <functional>
 struct GLFWwindow;
 
 class Window {
@@ -24,6 +25,9 @@ public:
     void getCursorPos(double& x, double& y) const;
     void setCursorMode(int mode) const;
     float getTime() const;
+
+    using DropCallback = std::function<void(const std::vector<std::string>& paths)>;
+    void setDropCallback(DropCallback cb);
 
     GLFWwindow* handle() const { return m_window; }
     int width() const { return m_width; }

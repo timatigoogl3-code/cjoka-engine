@@ -27,3 +27,5 @@ Thumbs.db
 .vcpkg/
 g.txt
 session-*.md
+imgui.ini
+assets/.play_mode_backup.json

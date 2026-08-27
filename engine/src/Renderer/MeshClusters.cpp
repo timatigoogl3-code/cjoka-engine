@@ -12,6 +12,7 @@
 #include <iostream>
 
 namespace {
+
 int s_drawnClusters = 0;
 
 inline uint64_t posHash(const glm::vec3& p) {
@@ -28,6 +29,30 @@ inline uint64_t cellKey(const glm::vec3& p, const glm::vec3& n, float cell) {
     uint64_t z = static_cast<uint64_t>(static_cast<int64_t>(std::floor(p.z / cell)));
     uint64_t o = (n.x > 0 ? 1u : 0u) | (n.y > 0 ? 2u : 0u) | (n.z > 0 ? 4u : 0u);
     return ((x & 0x1FFFFF) | ((y & 0x1FFFFF) << 21) | ((z & 0x1FFFFF) << 42)) ^ (o << 60);
+}
+
+// Compute vertex indices that are shared by triangles from different clusters.
+// These vertices must survive simplification to prevent T-junction cracks.
+// Returns posHash(position) values (matching SimplifyVertexCluster's locked key).
+std::unordered_set<uint64_t> ComputeLockedVertices(const std::vector<Vertex>& verts,
+                                                   const std::vector<uint32_t>& idx,
+                                                   int clusterTris) {
+    std::unordered_set<uint64_t> locked;
+    size_t totalTris = idx.size() / 3;
+    std::unordered_map<uint32_t, uint32_t> vertCluster;
+    for (size_t t = 0; t < totalTris; ++t) {
+        uint32_t clusterId = static_cast<uint32_t>(t / clusterTris);
+        for (int j = 0; j < 3; ++j) {
+            uint32_t vi = idx[t * 3 + j];
+            auto it = vertCluster.find(vi);
+            if (it == vertCluster.end()) {
+                vertCluster[vi] = clusterId;
+            } else if (it->second != clusterId) {
+                locked.insert(posHash(verts[vi].position));
+            }
+        }
+    }
+    return locked;
 }
 
 inline void NormalizePlanes(glm::vec4 planes[6]) {
@@ -161,6 +186,220 @@ static void SimplifyVertexCluster(const std::vector<Vertex>& inV, const std::vec
     }
 }
 
+// ── Quadric Error Metrics (QEM) simplification ──────────────────────────────
+// Garland & Heckbert 1997. Preserves thin features (leaves) much better
+// than vertex clustering because it measures geometric error per-edge.
+
+struct Quadric4x4 {
+    float m[10]; // upper triangle of symmetric 4x4: 0..3=row0, 4..6=row1, 7..8=row2, 9=row3
+
+    Quadric4x4() { std::fill(m, m + 10, 0.0f); }
+
+    static Quadric4x4 FromPlane(float nx, float ny, float nz, float d) {
+        Quadric4x4 q;
+        q.m[0]=nx*nx; q.m[1]=nx*ny; q.m[2]=nx*nz; q.m[3]=nx*d;
+        q.m[4]=ny*ny; q.m[5]=ny*nz; q.m[6]=ny*d;
+        q.m[7]=nz*nz; q.m[8]=nz*d;
+        q.m[9]=d*d;
+        return q;
+    }
+
+    Quadric4x4 operator+(const Quadric4x4& b) const {
+        Quadric4x4 r;
+        for (int i = 0; i < 10; ++i) r.m[i] = m[i] + b.m[i];
+        return r;
+    }
+
+    float Evaluate(const glm::vec3& v) const {
+        float x=v.x, y=v.y, z=v.z;
+        return m[0]*x*x + 2*m[1]*x*y + 2*m[2]*x*z + 2*m[3]*x
+             + m[4]*y*y + 2*m[5]*y*z + 2*m[6]*y
+             + m[7]*z*z + 2*m[8]*z + m[9];
+    }
+};
+
+static bool SolveOptimal(const Quadric4x4& q, glm::vec3& out) {
+    float a00=q.m[0], a01=q.m[1], a02=q.m[2], b0=q.m[3];
+    float a11=q.m[4], a12=q.m[5], b1=q.m[6];
+    float a22=q.m[7], b2=q.m[8];
+    float det = a00*(a11*a22-a12*a12) - a01*(a01*a22-a12*b2) + a02*(a01*a12-a11*b2);
+    if (std::abs(det) < 1e-10f) return false;
+    float inv = 1.0f / det;
+    out.x = -((a11*a22-a12*a12)*b0 - (a01*a22-a12*b2)*b1 + (a01*a12-a11*b2)*b2) * inv;
+    out.y = -((a02*a12-a01*a22)*b0 + (a00*a22-a02*a02)*b1 - (a00*a12-a01*a02)*b2) * inv;
+    out.z = -((a01*a12-a02*a11)*b0 - (a00*a12-a02*a01)*b1 + (a00*a11-a01*a01)*b2) * inv;
+    return true;
+}
+
+static void SimplifyQuadric(const std::vector<Vertex>& inV, const std::vector<uint32_t>& inI,
+                            float targetRatio, std::vector<Vertex>& outV, std::vector<uint32_t>& outI,
+                            std::vector<uint32_t>& surviveCount,
+                            const std::unordered_set<uint64_t>* locked) {
+    outV.clear();
+    outI.clear();
+    surviveCount.clear();
+
+    const size_t nVert = inV.size();
+    const size_t nTri = inI.size() / 3;
+    const size_t targetTri = std::max<size_t>(static_cast<size_t>(nTri * targetRatio), 1);
+    if (nTri <= targetTri) {
+        outV = inV; outI = inI;
+        surviveCount.resize(nTri);
+        for (size_t i = 0; i < nTri; ++i) surviveCount[i] = static_cast<uint32_t>(i + 1);
+        return;
+    }
+
+    // Mark locked vertices
+    std::vector<bool> vertLocked(nVert, false);
+    if (locked) {
+        for (size_t i = 0; i < nVert; ++i)
+            if (locked->count(posHash(inV[i].position))) vertLocked[i] = true;
+    }
+
+    // Per-vertex quadrics and live positions (updated on collapse)
+    std::vector<Quadric4x4> Q(nVert);
+    std::vector<glm::vec3> pos(nVert);
+    for (size_t i = 0; i < nVert; ++i) pos[i] = inV[i].position;
+
+    // Build face quadrics + edge adjacency
+    std::unordered_map<uint64_t, std::vector<uint32_t>> edgeTris;
+    edgeTris.reserve(nTri * 3);
+    for (uint32_t t = 0; t < nTri; ++t) {
+        uint32_t a=inI[t*3], b=inI[t*3+1], c=inI[t*3+2];
+        glm::vec3 n = glm::cross(pos[b]-pos[a], pos[c]-pos[a]);
+        float area = glm::length(n);
+        if (area < 1e-10f) continue;
+        n /= area;
+        float d = -glm::dot(n, pos[a]);
+        auto fq = Quadric4x4::FromPlane(n.x,n.y,n.z,d);
+        // Weight by area
+        for (int i=0;i<10;++i) fq.m[i] *= area;
+        Q[a]=Q[a]+fq; Q[b]=Q[b]+fq; Q[c]=Q[c]+fq;
+
+        auto addE=[&](uint32_t u,uint32_t v){
+            uint64_t k=(uint64_t(std::min(u,v))<<32)|std::max(u,v);
+            edgeTris[k].push_back(t);
+        };
+        addE(a,b); addE(b,c); addE(c,a);
+    }
+
+    // Edge cost computation
+    struct Edge { uint32_t v0,v1; float cost; };
+    auto computeCost=[&](uint32_t v0,uint32_t v1)->float{
+        Quadric4x4 eq = Q[v0]+Q[v1];
+        glm::vec3 opt;
+        float cost;
+        if (SolveOptimal(eq,opt) && std::isfinite(opt.x)) {
+            cost = eq.Evaluate(opt);
+        } else {
+            float e0=Q[v0].Evaluate(pos[v0]), e1=Q[v1].Evaluate(pos[v1]);
+            cost = std::min(e0,e1);
+        }
+        return cost < 0 ? 0 : cost;
+    };
+
+    auto edgeLess=[](const Edge& a,const Edge& b){return a.cost>b.cost;};
+    std::vector<Edge> heap;
+    heap.reserve(edgeTris.size());
+    for (auto& [key,tris] : edgeTris) {
+        if (tris.size()<2) continue;
+        uint32_t v0=uint32_t(key>>32), v1=uint32_t(key&0xFFFFFFFF);
+        if (vertLocked[v0]||vertLocked[v1]) continue;
+        heap.push_back({v0,v1,computeCost(v0,v1)});
+    }
+    std::make_heap(heap.begin(),heap.end(),edgeLess);
+
+    // Union-Find
+    std::vector<uint32_t> uf(nVert);
+    for (uint32_t i=0;i<nVert;++i) uf[i]=i;
+    auto find=[&](uint32_t x)->uint32_t{
+        while(uf[x]!=x){uf[x]=uf[uf[x]];x=uf[x];} return x;
+    };
+
+    std::vector<bool> alive(nVert,true);
+    std::vector<bool> triAlive(nTri,true);
+    size_t curTriCount=nTri;
+
+    // Collapse loop
+    while (curTriCount>targetTri && !heap.empty()) {
+        Edge e=heap.front();
+        std::pop_heap(heap.begin(),heap.end(),edgeLess);
+        heap.pop_back();
+
+        uint32_t u=find(e.v0), v=find(e.v1);
+        if (u==v || !alive[u] || !alive[v]) continue;
+
+        // Merge v → u
+        alive[v]=false;
+        uf[v]=u;
+        Q[u]=Q[u]+Q[v];
+
+        // Optimal position for merged vertex
+        Quadric4x4 eq=Q[u];
+        glm::vec3 opt;
+        if (SolveOptimal(eq,opt) && std::isfinite(opt.x)) {
+            pos[u]=opt;
+        }
+        // else keep pos[u] as is
+
+        // Fix triangles: redirect v→u, remove degenerates
+        std::vector<uint64_t> affectedEdges;
+        for (uint32_t t=0;t<nTri && curTriCount>targetTri;++t) {
+            if (!triAlive[t]) continue;
+            uint32_t ra=find(inI[t*3]), rb=find(inI[t*3+1]), rc=find(inI[t*3+2]);
+            if (ra==rb || rb==rc || ra==rc) {
+                triAlive[t]=false; --curTriCount; continue;
+            }
+            // Record affected edges
+            auto rec=[&](uint32_t x,uint32_t y){
+                if(x!=y) affectedEdges.push_back((uint64_t(std::min(x,y))<<32)|std::max(x,y));
+            };
+            rec(ra,rb); rec(rb,rc); rec(ra,rc);
+        }
+
+        // Re-evaluate affected edges
+        std::sort(affectedEdges.begin(),affectedEdges.end());
+        affectedEdges.erase(std::unique(affectedEdges.begin(),affectedEdges.end()),affectedEdges.end());
+        for (uint64_t ek : affectedEdges) {
+            uint32_t eu=find(uint32_t(ek>>32)), ev=find(uint32_t(ek&0xFFFFFFFF));
+            if(eu==ev||!alive[eu]||!alive[ev]) continue;
+            if(vertLocked[eu]||vertLocked[ev]) continue;
+            heap.push_back({eu,ev,computeCost(eu,ev)});
+            std::push_heap(heap.begin(),heap.end(),edgeLess);
+        }
+    }
+
+    // Collect surviving vertices
+    std::vector<uint32_t> newIdx(nVert, UINT32_MAX);
+    outV.clear();
+    for (uint32_t i=0;i<nVert;++i) {
+        uint32_t root=find(i);
+        if (root==i && alive[i]) {
+            newIdx[i]=static_cast<uint32_t>(outV.size());
+            Vertex v=inV[i];
+            v.position=pos[i];
+            outV.push_back(v);
+        }
+    }
+
+    // Remap index buffer
+    for (uint32_t t=0;t<nTri;++t) {
+        if (!triAlive[t]) continue;
+        uint32_t a=find(inI[t*3]), b=find(inI[t*3+1]), c=find(inI[t*3+2]);
+        if (a==b||b==c||a==c) continue;
+        if (newIdx[a]==UINT32_MAX||newIdx[b]==UINT32_MAX||newIdx[c]==UINT32_MAX) continue;
+        outI.push_back(newIdx[a]); outI.push_back(newIdx[b]); outI.push_back(newIdx[c]);
+    }
+
+    // Build surviveCount
+    surviveCount.resize(nTri);
+    uint32_t acc=0;
+    for (size_t t=0;t<nTri;++t) {
+        if(triAlive[t]) ++acc;
+        surviveCount[t]=acc;
+    }
+}
+
 static void MortonReorder(std::vector<uint32_t>& idx, std::vector<Vertex>& verts,
                           const glm::vec3& bmin, const glm::vec3& bmax) {
     size_t nTri = idx.size() / 3;
@@ -221,12 +460,22 @@ void ClusteredMesh::Build(const std::vector<Vertex>& verts, const std::vector<ui
         std::vector<Vertex> nxtV;
         std::vector<uint32_t> nxtI;
         std::vector<uint32_t> survive;
-        SimplifyVertexCluster(curV, curI, cell, nxtV, nxtI, survive, nullptr);
+
+        // Recompute locked vertices for THIS level's cluster topology
+        auto lockedSet = ComputeLockedVertices(curV, curI, clusterTris);
+        if (cluster_lod::useQuadric) {
+            // QEM: target 50% reduction per level (preserves thin features)
+            SimplifyQuadric(curV, curI, 0.5f, nxtV, nxtI, survive, &lockedSet);
+        } else {
+            SimplifyVertexCluster(curV, curI, cell, nxtV, nxtI, survive, &lockedSet);
+        }
+
         if (nxtI.empty()) break;
         MortonReorder(nxtI, nxtV, bmin, bmax);
         lodVerts.push_back(nxtV);
         lodIdx.push_back(nxtI);
         lodErrors.push_back(cell);
+
         curV = std::move(nxtV);
         curI = std::move(nxtI);
         cell *= 2.0f;
@@ -289,9 +538,11 @@ void ClusteredMesh::Build(const std::vector<Vertex>& verts, const std::vector<ui
     }
 }
 
-int ClusteredMesh::SelectAndFill(const glm::mat4& mvp, const glm::mat4& model, const glm::vec3& camPos,
-                                 float fovYrad, float screenH, float thresholdPx) const {
-    if (m_clusters.empty()) return 0;
+ClusteredMesh::LODSelection ClusteredMesh::SelectLODs(const glm::mat4& mvp, const glm::mat4& model,
+                                                       const glm::vec3& camPos, float fovYrad,
+                                                       float screenH, float thresholdPx) const {
+    LODSelection sel;
+    if (m_clusters.empty()) return sel;
 
     float objScale = glm::length(glm::vec3(model[0]));
     glm::mat4 mT = glm::transpose(mvp);
@@ -299,11 +550,9 @@ int ClusteredMesh::SelectAndFill(const glm::mat4& mvp, const glm::mat4& model, c
     NormalizePlanes(planes);
 
     glm::vec3 worldBoundCenter = glm::vec3(model * glm::vec4(m_boundCenter, 1.0f));
-    if (!FrustumSphere(planes, worldBoundCenter, m_boundRadius * objScale)) return 0;
+    if (!FrustumSphere(planes, worldBoundCenter, m_boundRadius * objScale)) return sel;
 
     float tanHalf = std::tan(fovYrad * 0.5f);
-    std::vector<GLsizei> counts[8];
-    std::vector<const void*> offs[8];
 
     auto visible = [&](const MeshCluster& cl) -> bool {
         glm::vec3 wc = glm::vec3(model * glm::vec4(cl.center, 1.0f));
@@ -315,29 +564,32 @@ int ClusteredMesh::SelectAndFill(const glm::mat4& mvp, const glm::mat4& model, c
         return true;
     };
 
-    int drawn = 0;
     for (const auto& cl : m_clusters) {
         if (!visible(cl)) continue;
         int lod = std::min(static_cast<int>(cl.lod), 7);
-        counts[lod].push_back(static_cast<GLsizei>(cl.indexCount));
-        offs[lod].push_back(reinterpret_cast<const void*>(static_cast<uintptr_t>(cl.indexOffset * sizeof(uint32_t))));
-        ++drawn;
+        sel.counts[lod].push_back(static_cast<GLsizei>(cl.indexCount));
+        sel.offs[lod].push_back(reinterpret_cast<const void*>(static_cast<uintptr_t>(cl.indexOffset * sizeof(uint32_t))));
+        ++sel.drawn;
     }
+    return sel;
+}
 
+void ClusteredMesh::DrawSelection(const LODSelection& sel) const {
     for (int k = 7; k >= 0; --k) {
-        if (counts[k].empty() || k >= static_cast<int>(m_lods.size())) continue;
+        if (sel.counts[k].empty() || k >= static_cast<int>(m_lods.size())) continue;
         glBindVertexArray(m_lods[k].vao);
-        glMultiDrawElements(GL_TRIANGLES, counts[k].data(), GL_UNSIGNED_INT, offs[k].data(), static_cast<GLsizei>(counts[k].size()));
+        glMultiDrawElements(GL_TRIANGLES, sel.counts[k].data(), GL_UNSIGNED_INT, sel.offs[k].data(),
+                            static_cast<GLsizei>(sel.counts[k].size()));
     }
     glBindVertexArray(0);
-    return drawn;
 }
 
 int ClusteredMesh::Draw(const glm::mat4& mvp, const glm::mat4& model, const glm::vec3& camPos,
                         float fovYrad, float screenH, float errorThresholdPx) const {
-    int drawn = SelectAndFill(mvp, model, camPos, fovYrad, screenH, errorThresholdPx);
-    s_drawnClusters += drawn;
-    return drawn;
+    auto sel = SelectLODs(mvp, model, camPos, fovYrad, screenH, errorThresholdPx);
+    DrawSelection(sel);
+    s_drawnClusters += sel.drawn;
+    return sel.drawn;
 }
 
 int ClusteredMesh::DrawLODColors(const glm::mat4& mvp, const glm::mat4& model, const glm::vec3& camPos,
@@ -354,9 +606,19 @@ int ClusteredMesh::DrawLODColors(const glm::mat4& mvp, const glm::mat4& model, c
         {0.10f, 0.95f, 0.95f}, {0.25f, 0.40f, 1.0f}, {0.65f, 0.20f, 1.0f}, {0.90f, 0.30f, 0.95f}
     };
 
-    int drawn = SelectAndFill(mvp, model, camPos, fovYrad, screenH, errorThresholdPx);
-    s_drawnClusters += drawn;
-    return drawn;
+    auto sel = SelectLODs(mvp, model, camPos, fovYrad, screenH, errorThresholdPx);
+
+    for (int k = 7; k >= 0; --k) {
+        if (sel.counts[k].empty() || k >= static_cast<int>(m_lods.size())) continue;
+        flatShader->setVec3("uColor", rainbow[std::min(k, 7)]);
+        glBindVertexArray(m_lods[k].vao);
+        glMultiDrawElements(GL_TRIANGLES, sel.counts[k].data(), GL_UNSIGNED_INT, sel.offs[k].data(),
+                            static_cast<GLsizei>(sel.counts[k].size()));
+    }
+    glBindVertexArray(0);
+
+    s_drawnClusters += sel.drawn;
+    return sel.drawn;
 }
 
 void ClusteredMesh::EnsureInstanceVBO(int needed) const {
@@ -366,18 +628,33 @@ void ClusteredMesh::EnsureInstanceVBO(int needed) const {
     if (needed > m_instanceCap) {
         m_instanceCap = std::max(needed, m_instanceCap * 2 + 16);
         glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-        glBufferData(GL_ARRAY_BUFFER, m_instanceCap * sizeof(glm::mat4), nullptr, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, m_instanceCap * sizeof(InstanceData), nullptr, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 }
 
 void ClusteredMesh::BindInstanceAttribs() const {
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+    // layout 4-7: mat4 model
     for (int i = 0; i < 4; ++i) {
         glEnableVertexAttribArray(4 + i);
-        glVertexAttribPointer(4 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4), reinterpret_cast<void*>(i * sizeof(glm::vec4)));
+        glVertexAttribPointer(4 + i, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), reinterpret_cast<void*>(i * sizeof(glm::vec4)));
         glVertexAttribDivisor(4 + i, 1);
     }
+    // layout 8-11: mat4 prevModel
+    for (int i = 0; i < 4; ++i) {
+        glEnableVertexAttribArray(8 + i);
+        glVertexAttribPointer(8 + i, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), reinterpret_cast<void*>(sizeof(glm::mat4) + i * sizeof(glm::vec4)));
+        glVertexAttribDivisor(8 + i, 1);
+    }
+    // layout 12: albedo
+    glEnableVertexAttribArray(12);
+    glVertexAttribPointer(12, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), reinterpret_cast<void*>(2 * sizeof(glm::mat4)));
+    glVertexAttribDivisor(12, 1);
+    // layout 13: emissive
+    glEnableVertexAttribArray(13);
+    glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), reinterpret_cast<void*>(2 * sizeof(glm::mat4) + sizeof(glm::vec4)));
+    glVertexAttribDivisor(13, 1);
 }
 
 int ClusteredMesh::PickLOD(float dist, float objScale, float fovYrad, float screenH, float thresholdPx) const {
@@ -391,29 +668,29 @@ int ClusteredMesh::PickLOD(float dist, float objScale, float fovYrad, float scre
     return static_cast<int>(m_lodRanges.size()) - 1;
 }
 
-int ClusteredMesh::DrawInstanced(const glm::mat4* models, int count,
+int ClusteredMesh::DrawInstanced(const InstanceData* instances, int count,
                                  const glm::vec3& camPos, const glm::mat4& viewProj,
                                  float fovYrad, float screenH, float thresholdPx) const {
     if (count <= 0 || m_lods.empty()) return 0;
 
     EnsureInstanceVBO(count);
 
-    std::vector<glm::mat4> lodModels[8];
+    std::vector<InstanceData> lodInstances[8];
     for (int i = 0; i < count; ++i) {
-        glm::vec3 pos = glm::vec3(models[i][3]);
-        float scale = glm::length(glm::vec3(models[i][0]));
+        glm::vec3 pos = glm::vec3(instances[i].model[3]);
+        float scale = glm::length(glm::vec3(instances[i].model[0]));
         float dist = glm::length(camPos - pos);
         int lod = PickLOD(dist, scale, fovYrad, screenH, thresholdPx);
         lod = std::clamp(lod, 0, static_cast<int>(m_lods.size()) - 1);
-        lodModels[lod].push_back(models[i]);
+        lodInstances[lod].push_back(instances[i]);
     }
 
     int totalDrawn = 0;
     for (int l = 0; l < static_cast<int>(m_lods.size()); ++l) {
-        if (lodModels[l].empty()) continue;
-        int instCount = static_cast<int>(lodModels[l].size());
+        if (lodInstances[l].empty()) continue;
+        int instCount = static_cast<int>(lodInstances[l].size());
         glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, instCount * sizeof(glm::mat4), lodModels[l].data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, instCount * sizeof(InstanceData), lodInstances[l].data());
 
         glBindVertexArray(m_lods[l].vao);
         BindInstanceAttribs();
@@ -427,8 +704,13 @@ int ClusteredMesh::DrawInstanced(const glm::mat4* models, int count,
 int ClusteredMesh::DrawInstancedShadow(const glm::mat4* models, int count,
                                        const glm::vec3& lightEye, const glm::mat4& lightVP,
                                        float thresholdPx) const {
-    (void)lightVP;
-    return DrawInstanced(models, count, lightEye, lightVP, glm::radians(60.0f), 1024.0f, thresholdPx);
+    // Convert model matrices to InstanceData for shadow pass (prevModel = model, no motion needed)
+    std::vector<InstanceData> shadowInstances(count);
+    for (int i = 0; i < count; ++i) {
+        shadowInstances[i].model = models[i];
+        shadowInstances[i].prevModel = models[i];
+    }
+    return DrawInstanced(shadowInstances.data(), count, lightEye, lightVP, glm::radians(60.0f), 1024.0f, thresholdPx);
 }
 
 size_t ClusteredMesh::totalTrisLod0() const {

@@ -13,6 +13,7 @@ struct Transform {
     glm::vec3 position{0.0f};
     glm::vec3 rotation{0.0f}; // euler degrees (pitch, yaw, roll / X, Y, Z)
     glm::vec3 scale{1.0f};
+    glm::mat4 prevMatrix{1.0f};  // для motion vectors (velocity buffer)
 
     Transform() = default;
     Transform(const glm::vec3& pos) : position(pos) {}
@@ -22,6 +23,9 @@ struct Transform {
     static Transform FromPosition(const glm::vec3& pos) { return Transform{pos}; }
     static Transform FromPosScale(const glm::vec3& pos, const glm::vec3& scl) { return Transform{pos, {}, scl}; }
     static Transform FromPosScale(const glm::vec3& pos, float uniformScale) { return Transform{pos, {}, glm::vec3(uniformScale)}; }
+
+    // Вызвать в конце кадра чтобы сохранить текущую матрицу для следующего кадра
+    void updatePrevMatrix() { prevMatrix = matrix(); }
 
     glm::mat4 matrix() const {
         glm::mat4 m(1.0f);
@@ -71,6 +75,7 @@ struct Material {
 
     bool useDiffuseMap = false;
     bool useSpecularMap = false;
+    bool useNormalMap = false;
 
     // --- Пресеты для быстрой разработки ---
     static Material Default() { return Material{}; }
@@ -110,6 +115,16 @@ struct Material {
     Material& withTexture(const std::shared_ptr<Texture>& tex) {
         diffuseMap = tex;
         useDiffuseMap = (tex && tex->valid());
+        return *this;
+    }
+    Material& withNormalMap(const std::shared_ptr<Texture>& tex) {
+        normalMap = tex;
+        useNormalMap = (tex && tex->valid());
+        return *this;
+    }
+    Material& withSpecularMap(const std::shared_ptr<Texture>& tex) {
+        specularMap = tex;
+        useSpecularMap = (tex && tex->valid());
         return *this;
     }
 };
@@ -305,3 +320,14 @@ struct Decal {
 };
 
 using DecalComponent = Decal;
+
+// ---------- CharacterController ----------
+struct CharacterController {
+    float radius = 0.4f;
+    float height = 1.8f;
+    float speed = 8.0f;
+    float jumpForce = 5.0f;
+    glm::vec3 velocity{0.0f};
+    bool onGround = false;
+    void* pxController = nullptr; // PxCapsuleController* at runtime
+};

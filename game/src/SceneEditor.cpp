@@ -3,6 +3,7 @@
 #include "engine/ECS/Systems.h"
 #include "engine/Renderer/DefaultShaders.h"
 #include "engine/Assets/AssetManager.h"
+#include "engine/Physics/Physics.h"
 #include "Prefabs.h"
 #include <imgui.h>
 #include <ImGuizmo.h>
@@ -46,12 +47,17 @@ SceneEditor::~SceneEditor() = default;
 void SceneEditor::onInit() {
     std::cout << "[SceneEditor] Initializing Editor & Graphics Sandbox\n";
 
+    cjoka_phys::Global::Init();
+    m_phys = std::make_unique<cjoka_phys::World>(glm::vec3{0.0f, -9.81f, 0.0f});
+
     m_litShader = std::make_unique<Shader>(DefaultShaders::kLitVS, DefaultShaders::kLitFS);
 
-    // Initial camera
-    auto camRef = scene().create("EditorCamera", Transform{m_camPos, {m_camPitch, m_camYaw, 0.0f}, glm::vec3(1.0f)});
-    camRef.add<Camera>(Camera{m_camFov, 0.1f, 1000.0f, true, true, 10.0f});
-    m_camera = camRef.id();
+    // Hook up OS Drag & Drop callback
+    window().setDropCallback([this](const std::vector<std::string>& paths) {
+        onFilesDropped(paths);
+    });
+
+    refreshAvailableScenes();
 
     // Check if custom_scene.json exists
     std::ifstream check("assets/custom_scene.json");
@@ -63,14 +69,76 @@ void SceneEditor::onInit() {
     }
 }
 
+void SceneEditor::refreshAvailableScenes() {
+    m_availableScenes.clear();
+    if (std::filesystem::exists("assets")) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator("assets")) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                m_availableScenes.push_back(entry.path().string());
+            }
+        }
+    }
+}
+
+void SceneEditor::onFilesDropped(const std::vector<std::string>& paths) {
+    glm::vec3 spawnPos = m_camPos + glm::vec3(0, 0, 4);
+    for (const auto& pathStr : paths) {
+        std::filesystem::path p(pathStr);
+        std::string ext = p.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        std::string stem = p.stem().string();
+
+        if (ext == ".obj") {
+            std::cout << "[DragDrop] Spawning 3D Model: " << pathStr << "\n";
+            std::string tex = "";
+            std::string candidateTex = p.parent_path().string() + "/" + stem + ".png";
+            if (std::filesystem::exists(candidateTex)) tex = candidateTex;
+            else if (std::filesystem::exists("assets/textures/colormap.png")) tex = "assets/textures/colormap.png";
+
+            m_selectedEntity = spawnModel(stem, pathStr, tex, spawnPos, 1.0f);
+            spawnPos.x += 2.5f;
+        } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga") {
+            std::cout << "[DragDrop] Applying Texture: " << pathStr << "\n";
+            if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                auto& mr = registry().get<MeshRenderer>(m_selectedEntity);
+                mr.texturePath = pathStr;
+                mr.material.diffuseMap = Assets::Texture(pathStr, true);
+                mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
+            }
+        } else if (ext == ".json") {
+            std::cout << "[DragDrop] Loading Scene: " << pathStr << "\n";
+            loadSceneFromFile(pathStr);
+            strncpy(m_sceneFileBuf, pathStr.c_str(), sizeof(m_sceneFileBuf));
+        }
+    }
+}
+
+void SceneEditor::updateScripts(float dt) {
+    if (!m_isPlaying) return;
+
+    for (Entity e : registry().view<NativeScript>()) {
+        auto& ns = registry().get<NativeScript>(e);
+        if (!ns.instance && ns.instantiate) {
+            ns.instance = ns.instantiate();
+            if (ns.instance) {
+                ns.instance->_init(e, &registry());
+                ns.instance->onCreate();
+                ns.instance->onStart();
+            }
+        }
+        if (ns.instance) {
+            ns.instance->onUpdate(dt);
+        }
+    }
+}
+
 void SceneEditor::loadDefaultShowcase() {
     scene().clear();
     m_selectedEntity = NullEntity;
 
-    // Recreate camera
-    auto camRef = scene().create("EditorCamera", Transform{m_camPos, {m_camPitch, m_camYaw, 0.0f}, glm::vec3(1.0f)});
-    camRef.add<Camera>(Camera{m_camFov, 0.1f, 1000.0f, true, true, 10.0f});
-    m_camera = camRef.id();
+    // Create Main Game Camera
+    auto camRef = scene().create("MainCamera", Transform{{0.0f, 3.5f, -12.0f}, {-10.0f, 0.0f, 0.0f}, glm::vec3(1.0f)});
+    camRef.add<Camera>(Camera{65.0f, 0.1f, 1000.0f, true, true, 10.0f});
 
     // Atmosphere
     scene().create("Sky").add<Sky>(Sky::Sunset());
@@ -121,9 +189,8 @@ void SceneEditor::loadDefaultShowcase() {
 void SceneEditor::newScene() {
     scene().clear();
     m_selectedEntity = NullEntity;
-    auto camRef = scene().create("EditorCamera", Transform{m_camPos, {m_camPitch, m_camYaw, 0.0f}, glm::vec3(1.0f)});
-    camRef.add<Camera>(Camera{m_camFov, 0.1f, 1000.0f, true, true, 10.0f});
-    m_camera = camRef.id();
+    auto camRef = scene().create("MainCamera", Transform{{0.0f, 3.5f, -12.0f}, {-10.0f, 0.0f, 0.0f}, glm::vec3(1.0f)});
+    camRef.add<Camera>(Camera{65.0f, 0.1f, 1000.0f, true, true, 10.0f});
     scene().create("Sky").add<Sky>(Sky::Sunset());
     scene().create("Sun").add<DirectionalLight>(DirectionalLight{glm::normalize(glm::vec3{-0.4f, -0.8f, -0.3f}), {1.0f, 0.92f, 0.82f}, 2.0f});
     scene().create("Ambient").add<AmbientLight>(AmbientLight{{0.15f, 0.15f, 0.15f}, 1.0f});
@@ -187,8 +254,6 @@ Entity SceneEditor::spawnPointLight(const glm::vec3& pos, const glm::vec3& col, 
 }
 
 void SceneEditor::pickObjectUnderMouse() {
-    if (!registry().valid(m_camera)) return;
-
     double mouseX, mouseY;
     window().getCursorPos(mouseX, mouseY);
     int w, h; window().getFramebufferSize(w, h);
@@ -197,12 +262,17 @@ void SceneEditor::pickObjectUnderMouse() {
     float ndcX = (2.0f * (float)mouseX) / (float)w - 1.0f;
     float ndcY = 1.0f - (2.0f * (float)mouseY) / (float)h;
 
-    auto& camTr = registry().get<Transform>(m_camera);
-    auto& camComp = registry().get<Camera>(m_camera);
     float aspect = float(w) / float(h ? h : 1);
-
-    glm::mat4 view = Camera::viewFromTransform(camTr);
-    glm::mat4 proj = camComp.projection(aspect);
+    float yawRad = glm::radians(m_camYaw);
+    float pitchRad = glm::radians(m_camPitch);
+    glm::vec3 front{
+        std::cos(yawRad) * std::cos(pitchRad),
+        std::sin(pitchRad),
+        std::sin(yawRad) * std::cos(pitchRad)
+    };
+    front = glm::normalize(front);
+    glm::mat4 view = glm::lookAt(m_camPos, m_camPos + front, glm::vec3(0, 1, 0));
+    glm::mat4 proj = glm::perspective(glm::radians(m_camFov), aspect, 0.1f, 2000.0f);
     glm::mat4 invVP = glm::inverse(proj * view);
 
     glm::vec4 nearPoint = invVP * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
@@ -217,8 +287,6 @@ void SceneEditor::pickObjectUnderMouse() {
     float closestT = 1e9f;
 
     for (Entity e : registry().view<Transform>()) {
-        if (e == m_camera) continue;
-
         auto& tr = registry().get<Transform>(e);
         glm::mat4 model = tr.matrix();
         glm::mat4 invModel = glm::inverse(model);
@@ -237,13 +305,15 @@ void SceneEditor::pickObjectUnderMouse() {
         } else if (registry().has<PointLight>(e)) {
             minB = glm::vec3(-0.3f);
             maxB = glm::vec3(0.3f);
+        } else if (registry().has<Camera>(e)) {
+            minB = glm::vec3(-0.4f);
+            maxB = glm::vec3(0.4f);
         } else {
             continue;
         }
 
         float t = 0.0f;
         if (RayIntersectAABB(localRayOrigin, localRayDir, minB, maxB, t)) {
-            // Calculate world space distance
             glm::vec3 worldHit = glm::vec3(model * glm::vec4(localRayOrigin + localRayDir * t, 1.0f));
             float dist = glm::distance(rayOrigin, worldHit);
             if (dist < closestT) {
@@ -260,27 +330,385 @@ void SceneEditor::pickObjectUnderMouse() {
 }
 
 void SceneEditor::updateCamera(float dt) {
-    // Toggle UI visibility with Tab
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (m_isPlaying) {
+        Entity gameCam = NullEntity;
+        for (Entity e : registry().view<Camera, Transform>()) {
+            if (registry().get<Camera>(e).primary) {
+                gameCam = e;
+                break;
+            }
+            if (gameCam == NullEntity) gameCam = e;
+        }
+
+        if (registry().valid(gameCam) && registry().has<Transform>(gameCam)) {
+            auto& tr = registry().get<Transform>(gameCam);
+
+            if (window().isKeyPressed(GLFW_KEY_ESCAPE)) {
+                m_isPlaying = false;
+                loadSceneFromFile("assets/.play_mode_backup.json");
+                window().setCursorMode(GLFW_CURSOR_NORMAL);
+                m_flycamActive = false;
+                return;
+            }
+
+            // Mouse look in play mode
+            bool lookActive = window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT) ||
+                              window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT) ||
+                              m_flycamActive;
+
+            static bool wasPlayLook = false;
+            static double lastPlayX = 0, lastPlayY = 0;
+
+            if (lookActive) {
+                double curX, curY;
+                window().getCursorPos(curX, curY);
+                if (!wasPlayLook) {
+                    wasPlayLook = true;
+                    lastPlayX = curX;
+                    lastPlayY = curY;
+                    window().setCursorMode(GLFW_CURSOR_DISABLED);
+                } else {
+                    float dx = static_cast<float>(curX - lastPlayX);
+                    float dy = static_cast<float>(curY - lastPlayY);
+                    lastPlayX = curX;
+                    lastPlayY = curY;
+
+                    tr.rotation.y += dx * 0.15f;
+                    tr.rotation.x -= dy * 0.15f * (m_invertY ? -1.0f : 1.0f);
+                    tr.rotation.x = glm::clamp(tr.rotation.x, -89.0f, 89.0f);
+                }
+            } else {
+                if (wasPlayLook) {
+                    wasPlayLook = false;
+                    window().setCursorMode(GLFW_CURSOR_NORMAL);
+                }
+            }
+
+            // Game movement (WASD + Arrows)
+            if (!io.WantTextInput) {
+                float yawRad = glm::radians(tr.rotation.y);
+                float pitchRad = glm::radians(tr.rotation.x);
+                glm::vec3 front{
+                    std::cos(yawRad) * std::cos(pitchRad),
+                    std::sin(pitchRad),
+                    std::sin(yawRad) * std::cos(pitchRad)
+                };
+                front = glm::normalize(front);
+                glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0, 1, 0)));
+
+                glm::vec3 moveDir{0.0f};
+                if (window().isKeyPressed(GLFW_KEY_W) || window().isKeyPressed(GLFW_KEY_UP)) moveDir += front;
+                if (window().isKeyPressed(GLFW_KEY_S) || window().isKeyPressed(GLFW_KEY_DOWN)) moveDir -= front;
+                if (window().isKeyPressed(GLFW_KEY_D) || window().isKeyPressed(GLFW_KEY_RIGHT)) moveDir += right;
+                if (window().isKeyPressed(GLFW_KEY_A) || window().isKeyPressed(GLFW_KEY_LEFT)) moveDir -= right;
+
+                moveDir.y = 0.0f;
+                if (glm::length(moveDir) > 0.0f) moveDir = glm::normalize(moveDir);
+
+                float speed = 10.0f;
+                if (window().isKeyPressed(GLFW_KEY_LEFT_SHIFT)) speed *= 2.0f;
+
+                if (registry().has<CharacterController>(gameCam)) {
+                    auto& cc = registry().get<CharacterController>(gameCam);
+                    if (!cc.pxController && m_phys) {
+                        cc.pxController = m_phys->CreateCharacter(tr.position, cc.radius, cc.height);
+                        cc.velocity = glm::vec3(0.0f);
+                        cc.onGround = false;
+                    }
+
+                    glm::vec3 disp = moveDir * cc.speed * dt;
+                    cc.velocity.y -= 9.81f * dt;
+                    if (cc.onGround && window().isKeyPressed(GLFW_KEY_SPACE)) {
+                        cc.velocity.y = cc.jumpForce;
+                    }
+                    disp.y += cc.velocity.y * dt;
+
+                    glm::vec3 newPos = tr.position;
+                    if (cc.pxController && m_phys) {
+                        cc.onGround = m_phys->MoveCharacter(cc.pxController, disp, dt, newPos);
+                        if (cc.onGround) cc.velocity.y = 0.0f;
+                    } else {
+                        newPos += disp;
+                    }
+                    tr.position = newPos;
+                } else {
+                    tr.position += moveDir * speed * dt;
+                    if (window().isKeyPressed(GLFW_KEY_SPACE) || window().isKeyPressed(GLFW_KEY_E)) tr.position.y += speed * dt;
+                    if (window().isKeyPressed(GLFW_KEY_LEFT_CONTROL) || window().isKeyPressed(GLFW_KEY_Q)) tr.position.y -= speed * dt;
+                }
+            }
+            return;
+        }
+    }
+
+    // =========================================================================
+    // EDITOR CAMERA NAVIGATION
+    // =========================================================================
     if (Input::IsKeyJustPressed(GLFW_KEY_TAB)) {
         m_showUI = !m_showUI;
     }
 
-    // Toggle Flycam with Right Mouse Button
-    bool rmb = Input::IsMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT);
-    if (rmb && !m_flycamActive) {
-        m_flycamActive = true;
-        Input::SetCursorLocked(true);
-    } else if (!rmb && m_flycamActive) {
-        m_flycamActive = false;
-        Input::SetCursorLocked(false);
+    // Toggle continuous flycam with 'C' key
+    if (Input::IsKeyJustPressed(GLFW_KEY_C) && !io.WantTextInput) {
+        m_flycamActive = !m_flycamActive;
+        window().setCursorMode(m_flycamActive ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
     }
 
-    if (m_flycamActive) {
-        glm::vec2 delta = Input::GetMouseDelta();
-        m_camYaw   -= delta.x * 0.12f;
-        m_camPitch -= delta.y * 0.12f;
-        m_camPitch = glm::clamp(m_camPitch, -89.0f, 89.0f);
+    // 1. Right Mouse Button Look
+    bool rmb = window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT);
+    static bool wasRmb = false;
+    static double lastRmbX = 0, lastRmbY = 0;
 
+    if (rmb) {
+        double curX, curY;
+        window().getCursorPos(curX, curY);
+        if (!wasRmb) {
+            wasRmb = true;
+            lastRmbX = curX;
+            lastRmbY = curY;
+            window().setCursorMode(GLFW_CURSOR_DISABLED);
+        } else {
+            float dx = static_cast<float>(curX - lastRmbX);
+            float dy = static_cast<float>(curY - lastRmbY);
+            lastRmbX = curX;
+            lastRmbY = curY;
+
+            m_camYaw   += dx * 0.15f;
+            m_camPitch -= dy * 0.15f * (m_invertY ? -1.0f : 1.0f);
+            m_camPitch = glm::clamp(m_camPitch, -89.0f, 89.0f);
+        }
+    } else {
+        if (wasRmb) {
+            wasRmb = false;
+            if (!m_flycamActive) {
+                window().setCursorMode(GLFW_CURSOR_NORMAL);
+            }
+        }
+    }
+
+    // 2. Continuous flycam (C key) active
+    if (m_flycamActive && !rmb) {
+        static double lastFlyX = 0, lastFlyY = 0;
+        static bool firstFly = true;
+        double curX, curY;
+        window().getCursorPos(curX, curY);
+        if (firstFly) {
+            lastFlyX = curX; lastFlyY = curY; firstFly = false;
+        } else {
+            float dx = static_cast<float>(curX - lastFlyX);
+            float dy = static_cast<float>(curY - lastFlyY);
+            lastFlyX = curX; lastFlyY = curY;
+
+            m_camYaw   += dx * 0.15f;
+            m_camPitch -= dy * 0.15f * (m_invertY ? -1.0f : 1.0f);
+            m_camPitch = glm::clamp(m_camPitch, -89.0f, 89.0f);
+        }
+    }
+
+    // 3. Left Mouse Button in Scene (Drag to Rotate, or Alt+LMB to Orbit)
+    bool lmb = window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT);
+    bool altHeld = window().isKeyPressed(GLFW_KEY_LEFT_ALT) || window().isKeyPressed(GLFW_KEY_RIGHT_ALT);
+    static bool wasLmb = false;
+    static double lastLmbX = 0, lastLmbY = 0;
+
+    if (lmb && !rmb && !m_flycamActive && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing() && !io.WantCaptureMouse) {
+        double curX, curY;
+        window().getCursorPos(curX, curY);
+        if (!wasLmb) {
+            wasLmb = true;
+            lastLmbX = curX;
+            lastLmbY = curY;
+        } else {
+            float dx = static_cast<float>(curX - lastLmbX);
+            float dy = static_cast<float>(curY - lastLmbY);
+            lastLmbX = curX;
+            lastLmbY = curY;
+
+            if (altHeld) {
+                glm::vec3 pivot{0.0f};
+                if (registry().valid(m_selectedEntity) && registry().has<Transform>(m_selectedEntity)) {
+                    pivot = registry().get<Transform>(m_selectedEntity).position;
+                }
+                float dist = glm::distance(m_camPos, pivot);
+                if (dist < 0.5f) dist = 5.0f;
+
+                m_camYaw   += dx * 0.25f;
+                m_camPitch -= dy * 0.25f;
+                m_camPitch = glm::clamp(m_camPitch, -89.0f, 89.0f);
+
+                float newYawRad = glm::radians(m_camYaw);
+                float newPitchRad = glm::radians(m_camPitch);
+                glm::vec3 newFront{
+                    std::cos(newYawRad) * std::cos(newPitchRad),
+                    std::sin(newPitchRad),
+                    std::sin(newYawRad) * std::cos(newPitchRad)
+                };
+                m_camPos = pivot - glm::normalize(newFront) * dist;
+            } else {
+                m_camYaw   += dx * 0.15f;
+                m_camPitch -= dy * 0.15f;
+                m_camPitch = glm::clamp(m_camPitch, -89.0f, 89.0f);
+            }
+        }
+    } else {
+        wasLmb = false;
+    }
+
+    // 4. Middle Mouse Button (MMB) Pan
+    bool mmb = window().isMouseButtonPressed(GLFW_MOUSE_BUTTON_MIDDLE);
+    static bool wasMmb = false;
+    static double lastMmbX = 0, lastMmbY = 0;
+    if (mmb) {
+        double curX, curY;
+        window().getCursorPos(curX, curY);
+        if (!wasMmb) {
+            wasMmb = true;
+            lastMmbX = curX;
+            lastMmbY = curY;
+        } else {
+            float dx = static_cast<float>(curX - lastMmbX);
+            float dy = static_cast<float>(curY - lastMmbY);
+            lastMmbX = curX;
+            lastMmbY = curY;
+
+            float yawRad = glm::radians(m_camYaw);
+            float pitchRad = glm::radians(m_camPitch);
+            glm::vec3 fwd{
+                std::cos(yawRad) * std::cos(pitchRad),
+                std::sin(pitchRad),
+                std::sin(yawRad) * std::cos(pitchRad)
+            };
+            fwd = glm::normalize(fwd);
+            glm::vec3 r = glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
+            glm::vec3 u = glm::vec3(0, 1, 0);
+
+            m_camPos -= r * (dx * 0.025f);
+            m_camPos += u * (dy * 0.025f);
+        }
+    } else {
+        wasMmb = false;
+    }
+
+    // Direction vectors
+    float yawRad = glm::radians(m_camYaw);
+    float pitchRad = glm::radians(m_camPitch);
+    glm::vec3 front{
+        std::cos(yawRad) * std::cos(pitchRad),
+        std::sin(pitchRad),
+        std::sin(yawRad) * std::cos(pitchRad)
+    };
+    front = glm::normalize(front);
+    glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0, 1, 0)));
+    glm::vec3 up = glm::vec3(0, 1, 0);
+
+    // 5. Mouse Wheel Zoom
+    if (io.MouseWheel != 0.0f && (!io.WantCaptureMouse || rmb || m_flycamActive)) {
+        if (rmb || m_flycamActive) {
+            m_camSpeed = glm::clamp(m_camSpeed + io.MouseWheel * 3.0f, 2.0f, 150.0f);
+        } else {
+            m_camPos += front * (io.MouseWheel * 3.0f);
+        }
+    }
+
+    // 6. WASD Movement (ALWAYS ACTIVE unless typing in an ImGui text input box)
+    if (!io.WantTextInput) {
+        float speed = m_camSpeed;
+        if (window().isKeyPressed(GLFW_KEY_LEFT_SHIFT)) speed *= 2.5f;
+        if (window().isKeyPressed(GLFW_KEY_LEFT_CONTROL)) speed *= 0.3f;
+
+        if (window().isKeyPressed(GLFW_KEY_W) || window().isKeyPressed(GLFW_KEY_UP)) m_camPos += front * speed * dt;
+        if (window().isKeyPressed(GLFW_KEY_S) || window().isKeyPressed(GLFW_KEY_DOWN)) m_camPos -= front * speed * dt;
+        if (window().isKeyPressed(GLFW_KEY_D) || window().isKeyPressed(GLFW_KEY_RIGHT)) m_camPos += right * speed * dt;
+        if (window().isKeyPressed(GLFW_KEY_A) || window().isKeyPressed(GLFW_KEY_LEFT)) m_camPos -= right * speed * dt;
+        if (window().isKeyPressed(GLFW_KEY_E) || window().isKeyPressed(GLFW_KEY_SPACE)) m_camPos += up * speed * dt;
+        if (window().isKeyPressed(GLFW_KEY_Q)) m_camPos -= up * speed * dt;
+    }
+
+    // Focus Camera on Selected Entity with Key F
+    if (Input::IsKeyJustPressed(GLFW_KEY_F) && registry().valid(m_selectedEntity) && registry().has<Transform>(m_selectedEntity)) {
+        auto& tr = registry().get<Transform>(m_selectedEntity);
+        m_camPos = tr.position - front * 6.0f + glm::vec3(0, 2, 0);
+    }
+
+    // Duplicate selected with Ctrl+D
+    if (window().isKeyPressed(GLFW_KEY_LEFT_CONTROL) && Input::IsKeyJustPressed(GLFW_KEY_D)) {
+        if (registry().valid(m_selectedEntity)) {
+            duplicateEntity(m_selectedEntity);
+        }
+    }
+
+    // Object picking via Left Mouse Click (only when not dragging)
+    if (Input::IsMouseButtonJustPressed(GLFW_MOUSE_BUTTON_LEFT) && !altHeld && !rmb && !m_flycamActive) {
+        if (!io.WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
+            pickObjectUnderMouse();
+        }
+    }
+
+    // Window Toggle Shortcuts (Alt+1 .. Alt+8)
+    if (window().isKeyPressed(GLFW_KEY_LEFT_ALT) || window().isKeyPressed(GLFW_KEY_RIGHT_ALT)) {
+        if (Input::IsKeyJustPressed(GLFW_KEY_1)) m_showHierarchy = !m_showHierarchy;
+        if (Input::IsKeyJustPressed(GLFW_KEY_2)) m_showInspector = !m_showInspector;
+        if (Input::IsKeyJustPressed(GLFW_KEY_3)) m_showAssetBrowser = !m_showAssetBrowser;
+        if (Input::IsKeyJustPressed(GLFW_KEY_4)) m_showAtmosphereEditor = !m_showAtmosphereEditor;
+        if (Input::IsKeyJustPressed(GLFW_KEY_5)) m_showGraphicsSettings = !m_showGraphicsSettings;
+        if (Input::IsKeyJustPressed(GLFW_KEY_6)) m_showClusterLODSettings = !m_showClusterLODSettings;
+        if (Input::IsKeyJustPressed(GLFW_KEY_7)) m_showStats = !m_showStats;
+        if (Input::IsKeyJustPressed(GLFW_KEY_8)) m_showCameraPreview = !m_showCameraPreview;
+    }
+
+    // Keyboard Shortcuts for Gizmo (1, 2, 3 without Alt)
+    if (!m_flycamActive && !rmb && !altHeld && !io.WantTextInput) {
+        if (Input::IsKeyJustPressed(GLFW_KEY_1)) m_gizmoOperation = 0; // Translate
+        if (Input::IsKeyJustPressed(GLFW_KEY_2)) m_gizmoOperation = 1; // Rotate
+        if (Input::IsKeyJustPressed(GLFW_KEY_3)) m_gizmoOperation = 2; // Scale
+        if (Input::IsKeyJustPressed(GLFW_KEY_DELETE) && registry().valid(m_selectedEntity)) {
+            scene().destroy(m_selectedEntity);
+            m_selectedEntity = NullEntity;
+        }
+    }
+}
+
+void SceneEditor::onUpdate(float dt) {
+    if (m_isPlaying && m_phys) {
+        m_phys->Step(dt);
+        m_phys->SyncToECS(registry());
+    }
+
+    updateCamera(dt);
+    updateScripts(dt);
+
+    int w, h;
+    window().getFramebufferSize(w, h);
+    if (!m_pipe) m_pipe = std::make_unique<RenderPipeline>(w, h);
+    m_pipe->resize(w, h);
+    m_pipe->syncFromRegistry(registry());
+
+    float aspect = float(w) / float(h ? h : 1);
+    glm::mat4 viewMatrix(1.0f);
+    glm::mat4 projMatrix(1.0f);
+    glm::vec3 viewPos{0.0f};
+
+    Entity activeCam = NullEntity;
+    if (m_isPlaying) {
+        for (Entity ent : registry().view<Camera, Transform>()) {
+            if (registry().get<Camera>(ent).primary) {
+                activeCam = ent;
+                break;
+            }
+            if (activeCam == NullEntity) activeCam = ent;
+        }
+    }
+
+    if (m_isPlaying && registry().valid(activeCam) && registry().has<Transform>(activeCam)) {
+        auto& camTr = registry().get<Transform>(activeCam);
+        auto& camComp = registry().get<Camera>(activeCam);
+        viewMatrix = Camera::viewFromTransform(camTr);
+        projMatrix = camComp.projection(aspect);
+        viewPos = camTr.position;
+    } else {
+        // Editor Freefly Camera
         float yawRad = glm::radians(m_camYaw);
         float pitchRad = glm::radians(m_camPitch);
         glm::vec3 front{
@@ -289,94 +717,40 @@ void SceneEditor::updateCamera(float dt) {
             std::sin(yawRad) * std::cos(pitchRad)
         };
         front = glm::normalize(front);
-        glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0, 1, 0)));
-        glm::vec3 up = glm::vec3(0, 1, 0);
-
-        float speed = m_camSpeed;
-        if (Input::IsKeyPressed(GLFW_KEY_LEFT_SHIFT)) speed *= 2.5f;
-        if (Input::IsKeyPressed(GLFW_KEY_LEFT_CONTROL)) speed *= 0.35f;
-
-        if (Input::IsKeyPressed(GLFW_KEY_W)) m_camPos += front * speed * dt;
-        if (Input::IsKeyPressed(GLFW_KEY_S)) m_camPos -= front * speed * dt;
-        if (Input::IsKeyPressed(GLFW_KEY_D)) m_camPos += right * speed * dt;
-        if (Input::IsKeyPressed(GLFW_KEY_A)) m_camPos -= right * speed * dt;
-        if (Input::IsKeyPressed(GLFW_KEY_E)) m_camPos += up * speed * dt;
-        if (Input::IsKeyPressed(GLFW_KEY_Q)) m_camPos -= up * speed * dt;
+        viewMatrix = glm::lookAt(m_camPos, m_camPos + front, glm::vec3(0, 1, 0));
+        projMatrix = glm::perspective(glm::radians(m_camFov), aspect, 0.1f, 2000.0f);
+        viewPos = m_camPos;
     }
 
-    // Object picking via Left Mouse Click
-    if (Input::IsMouseButtonJustPressed(GLFW_MOUSE_BUTTON_LEFT)) {
-        if (!m_flycamActive && !ImGui::GetIO().WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
-            pickObjectUnderMouse();
-        }
-    }
-
-    // Update Camera entity
-    if (registry().valid(m_camera)) {
-        auto& tr = registry().get<Transform>(m_camera);
-        tr.position = m_camPos;
-        tr.rotation = {m_camPitch, m_camYaw, 0.0f};
-        auto& cam = registry().get<Camera>(m_camera);
-        cam.fov = m_camFov;
-    }
-
-    // Keyboard Shortcuts
-    if (!m_flycamActive && !ImGui::GetIO().WantCaptureKeyboard) {
-        if (Input::IsKeyJustPressed(GLFW_KEY_W)) m_gizmoOperation = 0; // Translate
-        if (Input::IsKeyJustPressed(GLFW_KEY_E)) m_gizmoOperation = 1; // Rotate
-        if (Input::IsKeyJustPressed(GLFW_KEY_R)) m_gizmoOperation = 2; // Scale
-        if (Input::IsKeyJustPressed(GLFW_KEY_DELETE) && registry().valid(m_selectedEntity)) {
-            scene().destroy(m_selectedEntity);
-            m_selectedEntity = NullEntity;
-        }
-        if (Input::IsKeyPressed(GLFW_KEY_LEFT_CONTROL) && Input::IsKeyJustPressed(GLFW_KEY_D) && registry().valid(m_selectedEntity)) {
-            // Duplicate
-            auto& tr = registry().get<Transform>(m_selectedEntity);
-            std::string name = "Copy";
-            if (registry().has<Name>(m_selectedEntity)) name = registry().get<Name>(m_selectedEntity).value + "_Copy";
-            auto newRef = scene().create(name, Transform{tr.position + glm::vec3(1.0f, 0.0f, 0.0f), tr.rotation, tr.scale});
-            if (registry().has<MeshRenderer>(m_selectedEntity)) {
-                newRef.add<MeshRenderer>(registry().get<MeshRenderer>(m_selectedEntity));
-            }
-            if (registry().has<PointLight>(m_selectedEntity)) {
-                newRef.add<PointLight>(registry().get<PointLight>(m_selectedEntity));
-            }
-            m_selectedEntity = newRef.id();
-        }
-    }
-}
-
-void SceneEditor::onUpdate(float dt) {
-    updateCamera(dt);
-
-    int w, h;
-    window().getFramebufferSize(w, h);
-    if (!m_pipe) m_pipe = std::make_unique<RenderPipeline>(w, h);
-    m_pipe->resize(w, h);
-    m_pipe->syncFromRegistry(registry());
-
-    if (registry().valid(m_camera)) {
-        auto& camTr = registry().get<Transform>(m_camera);
-        auto& camComp = registry().get<Camera>(m_camera);
-        float aspect = float(w) / float(h ? h : 1);
-        m_pipe->setCameraMatrices(Camera::viewFromTransform(camTr), camComp.projection(aspect));
-    }
+    m_pipe->setCameraMatrices(viewMatrix, projMatrix);
 
     m_pipe->beginFrame();
-    Systems::Render(registry(), *m_litShader, window());
+    Systems::RenderWithCamera(registry(), *m_litShader, window(), viewMatrix, projMatrix, viewPos, m_pipe->prevViewProj());
     m_pipe->endFrame();
 }
 
 void SceneEditor::onImGuiRender() {
     if (!m_showUI) return;
 
+    if (m_isPlaying) {
+        // Pure game preview mode: hide all editor windows & gizmos, show minimal HUD
+        renderPlayModeOverlay();
+        return;
+    }
+
     renderMenuBar();
     renderGizmo();
-    renderHierarchy();
-    renderInspector();
-    renderSpawner();
-    renderAtmosphereEditor();
-    renderStats();
+    renderSceneCameraGizmos();
+
+    if (m_showHierarchy) renderHierarchy();
+    if (m_showInspector) renderInspector();
+    if (m_showAssetBrowser) renderAssetBrowser();
+    if (m_showAtmosphereEditor) renderAtmosphereEditor();
+    if (m_showGraphicsSettings) renderGraphicsSettings();
+    if (m_showClusterLODSettings) renderClusterLODSettings();
+    if (m_showStats) renderStats();
+    if (m_showCameraPreview) renderCameraPreview();
+    if (m_showBuildModal) renderBuildModal();
 }
 
 void SceneEditor::renderMenuBar() {
@@ -388,7 +762,23 @@ void SceneEditor::renderMenuBar() {
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) saveSceneToFile(m_sceneFileBuf);
             if (ImGui::MenuItem("Load Scene", "Ctrl+O")) loadSceneFromFile(m_sceneFileBuf);
             ImGui::Separator();
+            if (ImGui::MenuItem("Build Standalone Game Executable...", "F7")) buildStandaloneGame();
+            ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) close();
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Scenes")) {
+            refreshAvailableScenes();
+            for (const auto& scPath : m_availableScenes) {
+                bool isCurrent = (m_sceneFileBuf == scPath);
+                if (ImGui::MenuItem(scPath.c_str(), nullptr, isCurrent)) {
+                    loadSceneFromFile(scPath);
+                    strncpy(m_sceneFileBuf, scPath.c_str(), sizeof(m_sceneFileBuf));
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Refresh Scene List")) refreshAvailableScenes();
             ImGui::EndMenu();
         }
 
@@ -400,13 +790,121 @@ void SceneEditor::renderMenuBar() {
             if (ImGui::MenuItem("Local Space", nullptr, m_gizmoMode == 0)) m_gizmoMode = 0;
             if (ImGui::MenuItem("World Space", nullptr, m_gizmoMode == 1)) m_gizmoMode = 1;
             ImGui::Separator();
-            ImGui::MenuItem("Grid Snapping", nullptr, &m_useSnap);
+            if (ImGui::MenuItem("Grid Snapping", nullptr, &m_useSnap)) {}
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("View")) {
-            ImGui::MenuItem("Toggle Editor UI", "Tab", &m_showUI);
+        if (ImGui::BeginMenu("Window")) {
+            ImGui::MenuItem("Hierarchy", "Alt+1", &m_showHierarchy);
+            ImGui::MenuItem("Inspector", "Alt+2", &m_showInspector);
+            ImGui::MenuItem("Asset Browser", "Alt+3", &m_showAssetBrowser);
+            ImGui::MenuItem("Atmosphere & Sky", "Alt+4", &m_showAtmosphereEditor);
+            ImGui::MenuItem("Graphics & RTX / GI Settings", "Alt+5", &m_showGraphicsSettings);
+            ImGui::MenuItem("ClusterLOD / Nanite Settings", "Alt+6", &m_showClusterLODSettings);
+            ImGui::MenuItem("Performance Metrics", "Alt+7", &m_showStats);
+            ImGui::MenuItem("Game Camera Preview", "Alt+8", &m_showCameraPreview);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Show Default Panels")) {
+                m_showHierarchy = true;
+                m_showInspector = true;
+                m_showAssetBrowser = true;
+            }
+            if (ImGui::MenuItem("Show All Windows")) {
+                m_showHierarchy = true;
+                m_showInspector = true;
+                m_showAssetBrowser = true;
+                m_showAtmosphereEditor = true;
+                m_showGraphicsSettings = true;
+                m_showClusterLODSettings = true;
+                m_showStats = true;
+                m_showCameraPreview = true;
+            }
+            if (ImGui::MenuItem("Hide All Windows")) {
+                m_showHierarchy = false;
+                m_showInspector = false;
+                m_showAssetBrowser = false;
+                m_showAtmosphereEditor = false;
+                m_showGraphicsSettings = false;
+                m_showClusterLODSettings = false;
+                m_showStats = false;
+                m_showCameraPreview = false;
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Toggle Full Editor UI", "Tab", &m_showUI);
+            ImGui::MenuItem("Invert Mouse Y-Axis", nullptr, &m_invertY);
             ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Build")) {
+            if (ImGui::MenuItem("Build Standalone Game (Release)", "F7")) {
+                buildStandaloneGame();
+            }
+            ImGui::EndMenu();
+        }
+
+        // Center Play / Simulation Toolbar Button
+        ImGui::SameLine(ImGui::GetWindowWidth() * 0.5f - 160.0f);
+        if (!m_isPlaying) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.65f, 0.25f, 1.0f));
+            if (ImGui::Button(" [>] Play Game ", ImVec2(140, 0))) {
+                saveSceneToFile("assets/.play_mode_backup.json");
+                m_isPlaying = true;
+                if (m_phys) {
+                    m_phys->BuildFromECS(registry());
+                    for (Entity e : registry().view<CharacterController, Transform>()) {
+                        auto& cc = registry().get<CharacterController>(e);
+                        auto& tr = registry().get<Transform>(e);
+                        cc.pxController = m_phys->CreateCharacter(tr.position, cc.radius, cc.height);
+                        cc.velocity = glm::vec3(0.0f);
+                        cc.onGround = false;
+                    }
+                }
+                // Initialize all scripts on play
+                for (Entity e : registry().view<NativeScript>()) {
+                    auto& ns = registry().get<NativeScript>(e);
+                    if (ns.instantiate && !ns.instance) {
+                        ns.instance = ns.instantiate();
+                        ns.instance->_init(e, &registry());
+                        ns.instance->onCreate();
+                        ns.instance->onStart();
+                    }
+                }
+                std::cout << "[SceneEditor] Started Play Mode (Game View Active)\n";
+            }
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.22f, 0.2f, 1.0f));
+            if (ImGui::Button(" [x] Stop Game ", ImVec2(140, 0))) {
+                m_isPlaying = false;
+                loadSceneFromFile("assets/.play_mode_backup.json");
+                window().setCursorMode(GLFW_CURSOR_NORMAL);
+                std::cout << "[SceneEditor] Stopped Play Mode, scene restored\n";
+            }
+            ImGui::PopStyleColor();
+        }
+
+        // Build Standalone Game Toolbar Button
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.45f, 0.85f, 1.0f));
+        if (ImGui::Button(" [ Build Standalone ] ", ImVec2(150, 0))) {
+            buildStandaloneGame();
+        }
+        ImGui::PopStyleColor();
+
+        // Flycam Toggle Toolbar Button
+        ImGui::SameLine();
+        if (m_flycamActive) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.5f, 0.1f, 1.0f));
+            if (ImGui::Button(" [📹 Flycam: ON (C)] ", ImVec2(155, 0))) {
+                m_flycamActive = false;
+                window().setCursorMode(GLFW_CURSOR_NORMAL);
+            }
+            ImGui::PopStyleColor();
+        } else {
+            if (ImGui::Button(" [📹 Flycam: OFF (C)] ", ImVec2(155, 0))) {
+                m_flycamActive = true;
+                window().setCursorMode(GLFW_CURSOR_DISABLED);
+            }
         }
 
         ImGui::SameLine(ImGui::GetWindowWidth() - 340.0f);
@@ -417,15 +915,21 @@ void SceneEditor::renderMenuBar() {
 
 void SceneEditor::renderGizmo() {
     if (!registry().valid(m_selectedEntity) || !registry().has<Transform>(m_selectedEntity)) return;
-    if (!registry().valid(m_camera) || m_flycamActive) return;
+    if (m_flycamActive) return;
 
-    auto& camTr = registry().get<Transform>(m_camera);
-    auto& camComp = registry().get<Camera>(m_camera);
     int w, h; window().getFramebufferSize(w, h);
     float aspect = float(w) / float(h ? h : 1);
 
-    glm::mat4 view = Camera::viewFromTransform(camTr);
-    glm::mat4 proj = camComp.projection(aspect);
+    float yawRad = glm::radians(m_camYaw);
+    float pitchRad = glm::radians(m_camPitch);
+    glm::vec3 front{
+        std::cos(yawRad) * std::cos(pitchRad),
+        std::sin(pitchRad),
+        std::sin(yawRad) * std::cos(pitchRad)
+    };
+    front = glm::normalize(front);
+    glm::mat4 view = glm::lookAt(m_camPos, m_camPos + front, glm::vec3(0, 1, 0));
+    glm::mat4 proj = glm::perspective(glm::radians(m_camFov), aspect, 0.1f, 2000.0f);
 
     ImGuiIO& io = ImGui::GetIO();
     ImGuizmo::SetOrthographic(false);
@@ -457,25 +961,197 @@ void SceneEditor::renderGizmo() {
     }
 }
 
+void SceneEditor::renderPlayModeOverlay() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f - 190.0f, 16.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(380.0f, 44.0f), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav;
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.10f, 0.14f, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.75f, 0.4f, 0.9f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.5f);
+
+    if (ImGui::Begin("##PlayOverlay", nullptr, flags)) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "[GAME VIEW]");
+        ImGui::SameLine();
+        ImGui::TextDisabled("| FPS: %.0f", io.Framerate);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 165.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.18f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.25f, 0.25f, 1.0f));
+        if (ImGui::Button("Stop Game (ESC)", ImVec2(150, 26))) {
+            m_isPlaying = false;
+            loadSceneFromFile("assets/.play_mode_backup.json");
+            window().setCursorMode(GLFW_CURSOR_NORMAL);
+            std::cout << "[SceneEditor] Stopped Play Mode, scene restored\n";
+        }
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+}
+
+void SceneEditor::renderSceneCameraGizmos() {
+    if (m_isPlaying) return;
+
+    int w, h; window().getFramebufferSize(w, h);
+    float aspect = float(w) / float(h ? h : 1);
+
+    float yawRad = glm::radians(m_camYaw);
+    float pitchRad = glm::radians(m_camPitch);
+    glm::vec3 front{
+        std::cos(yawRad) * std::cos(pitchRad),
+        std::sin(pitchRad),
+        std::sin(yawRad) * std::cos(pitchRad)
+    };
+    front = glm::normalize(front);
+    glm::mat4 view = glm::lookAt(m_camPos, m_camPos + front, glm::vec3(0, 1, 0));
+    glm::mat4 proj = glm::perspective(glm::radians(m_camFov), aspect, 0.1f, 2000.0f);
+    glm::mat4 vp = proj * view;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+
+    auto worldToScreen = [&](const glm::vec3& p, ImVec2& outPt) -> bool {
+        glm::vec4 clip = vp * glm::vec4(p, 1.0f);
+        if (clip.w <= 0.05f) return false;
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        if (ndc.z < -1.0f || ndc.z > 1.0f) return false;
+        outPt.x = (ndc.x * 0.5f + 0.5f) * io.DisplaySize.x;
+        outPt.y = (1.0f - (ndc.y * 0.5f + 0.5f)) * io.DisplaySize.y;
+        return true;
+    };
+
+    for (Entity e : registry().view<Camera, Transform>()) {
+        auto& tr = registry().get<Transform>(e);
+        auto& cam = registry().get<Camera>(e);
+        bool isSelected = (m_selectedEntity == e);
+
+        ImVec2 screenPos;
+        if (worldToScreen(tr.position, screenPos)) {
+            float sz = 16.0f;
+            ImU32 iconColor = isSelected ? IM_COL32(60, 210, 255, 255) : IM_COL32(235, 235, 235, 230);
+            ImU32 bgColor = isSelected ? IM_COL32(20, 50, 75, 240) : IM_COL32(30, 34, 42, 210);
+
+            // Rounded icon badge
+            drawList->AddRectFilled(
+                ImVec2(screenPos.x - sz - 4, screenPos.y - sz - 4),
+                ImVec2(screenPos.x + sz + 4, screenPos.y + sz + 4),
+                bgColor, 6.0f);
+            drawList->AddRect(
+                ImVec2(screenPos.x - sz - 4, screenPos.y - sz - 4),
+                ImVec2(screenPos.x + sz + 4, screenPos.y + sz + 4),
+                iconColor, 6.0f, 0, isSelected ? 2.5f : 1.5f);
+
+            // Billboard Camera Glyph
+            // Camera body
+            drawList->AddRectFilled(
+                ImVec2(screenPos.x - 9, screenPos.y - 6),
+                ImVec2(screenPos.x + 3, screenPos.y + 6),
+                iconColor, 2.0f);
+            // Camera Top Reels
+            drawList->AddCircleFilled(ImVec2(screenPos.x - 5, screenPos.y - 8), 2.5f, iconColor);
+            drawList->AddCircleFilled(ImVec2(screenPos.x - 1, screenPos.y - 8), 2.5f, iconColor);
+            // Camera lens cone
+            drawList->AddTriangleFilled(
+                ImVec2(screenPos.x + 3, screenPos.y - 2),
+                ImVec2(screenPos.x + 9, screenPos.y - 6),
+                ImVec2(screenPos.x + 9, screenPos.y + 6),
+                iconColor);
+            drawList->AddTriangleFilled(
+                ImVec2(screenPos.x + 3, screenPos.y - 2),
+                ImVec2(screenPos.x + 9, screenPos.y + 6),
+                ImVec2(screenPos.x + 3, screenPos.y + 2),
+                iconColor);
+
+            // Label
+            std::string label = registry().has<Name>(e) ? registry().get<Name>(e).value : "Camera";
+            if (cam.primary) label += " (Primary)";
+            drawList->AddText(ImVec2(screenPos.x - sz - 2, screenPos.y + sz + 5), iconColor, label.c_str());
+
+            // Click to select
+            if (!m_flycamActive && !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive()) {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    ImVec2 mouse = io.MousePos;
+                    float dx = mouse.x - screenPos.x;
+                    float dy = mouse.y - screenPos.y;
+                    if (dx * dx + dy * dy <= (sz + 12) * (sz + 12)) {
+                        m_selectedEntity = e;
+                    }
+                }
+            }
+        }
+
+        // Draw 3D Camera Frustum Wireframe when selected
+        if (isSelected) {
+            float fovY = glm::radians(cam.fov);
+            float fovX = 2.0f * std::atan(std::tan(fovY * 0.5f) * aspect);
+            float d = 4.5f;
+            float hHalf = std::tan(fovY * 0.5f) * d;
+            float wHalf = std::tan(fovX * 0.5f) * d;
+
+            glm::mat4 m = tr.matrix();
+            glm::vec3 cOrigin = tr.position;
+            glm::vec4 localTL(-wHalf,  hHalf, d, 1.0f);
+            glm::vec4 localTR( wHalf,  hHalf, d, 1.0f);
+            glm::vec4 localBR( wHalf, -hHalf, d, 1.0f);
+            glm::vec4 localBL(-wHalf, -hHalf, d, 1.0f);
+
+            glm::vec3 wTL = glm::vec3(m * localTL);
+            glm::vec3 wTR = glm::vec3(m * localTR);
+            glm::vec3 wBR = glm::vec3(m * localBR);
+            glm::vec3 wBL = glm::vec3(m * localBL);
+
+            ImVec2 sOrigin, sTL, sTR, sBR, sBL;
+            bool okO = worldToScreen(cOrigin, sOrigin);
+            bool okTL = worldToScreen(wTL, sTL);
+            bool okTR = worldToScreen(wTR, sTR);
+            bool okBR = worldToScreen(wBR, sBR);
+            bool okBL = worldToScreen(wBL, sBL);
+
+            ImU32 frustumColor = IM_COL32(40, 220, 255, 220);
+            if (okO && okTL) drawList->AddLine(sOrigin, sTL, frustumColor, 1.5f);
+            if (okO && okTR) drawList->AddLine(sOrigin, sTR, frustumColor, 1.5f);
+            if (okO && okBR) drawList->AddLine(sOrigin, sBR, frustumColor, 1.5f);
+            if (okO && okBL) drawList->AddLine(sOrigin, sBL, frustumColor, 1.5f);
+
+            if (okTL && okTR) drawList->AddLine(sTL, sTR, frustumColor, 2.0f);
+            if (okTR && okBR) drawList->AddLine(sTR, sBR, frustumColor, 2.0f);
+            if (okBR && okBL) drawList->AddLine(sBR, sBL, frustumColor, 2.0f);
+            if (okBL && okTL) drawList->AddLine(sBL, sTL, frustumColor, 2.0f);
+        }
+    }
+}
+
 void SceneEditor::renderHierarchy() {
     ImGui::SetNextWindowPos(ImVec2(16, 36), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 480), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Scene Hierarchy", nullptr)) {
+    if (ImGui::Begin("Scene Hierarchy", &m_showHierarchy)) {
         ImGui::InputTextWithHint("##Search", "Search entities...", m_searchBuf, sizeof(m_searchBuf));
         ImGui::Separator();
 
-        if (ImGui::Button("+ Entity", ImVec2(90, 0))) {
+        if (ImGui::Button("+ Entity", ImVec2(65, 0))) {
             auto ref = scene().create("NewEntity", Transform{m_camPos + glm::vec3(0, 0, 5), {}, {1,1,1}});
             m_selectedEntity = ref.id();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Delete", ImVec2(80, 0)) && registry().valid(m_selectedEntity)) {
+        if (ImGui::Button("Duplicate", ImVec2(75, 0)) && registry().valid(m_selectedEntity)) {
+            duplicateEntity(m_selectedEntity);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", ImVec2(65, 0)) && registry().valid(m_selectedEntity)) {
             scene().destroy(m_selectedEntity);
             m_selectedEntity = NullEntity;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Clear All", ImVec2(80, 0))) {
+        if (ImGui::Button("Clear", ImVec2(55, 0))) {
             newScene();
         }
 
@@ -486,8 +1162,6 @@ void SceneEditor::renderHierarchy() {
         std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
 
         for (Entity e : registry().view<Transform>()) {
-            if (e == m_camera) continue;
-
             std::string name = "Entity_" + std::to_string((uint32_t)e);
             if (registry().has<Name>(e)) name = registry().get<Name>(e).value;
 
@@ -496,9 +1170,12 @@ void SceneEditor::renderHierarchy() {
             if (!filter.empty() && lowerName.find(filter) == std::string::npos) continue;
 
             std::string tag = "[Obj] ";
-            if (registry().has<PointLight>(e)) tag = "[Light] ";
+            if (registry().has<Camera>(e)) tag = "[Cam] ";
+            else if (registry().has<PointLight>(e)) tag = "[Light] ";
             else if (registry().has<DirectionalLight>(e)) tag = "[Sun] ";
             else if (registry().has<Sky>(e)) tag = "[Sky] ";
+            else if (registry().has<CharacterController>(e)) tag = "[Player] ";
+            else if (registry().has<NativeScript>(e)) tag = "[Script] ";
 
             bool isSelected = (m_selectedEntity == e);
             if (ImGui::Selectable((tag + name + "##" + std::to_string((uint32_t)e)).c_str(), isSelected)) {
@@ -511,19 +1188,19 @@ void SceneEditor::renderHierarchy() {
 }
 
 void SceneEditor::renderInspector() {
-    ImGui::SetNextWindowPos(ImVec2(1600 - 360, 36), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(340, 680), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(1600 - 380, 36), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(360, 680), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Inspector", nullptr)) {
+    if (ImGui::Begin("Inspector", &m_showInspector)) {
         if (!registry().valid(m_selectedEntity)) {
-            ImGui::TextDisabled("Click any object in 3D or list to select.");
+            ImGui::TextDisabled("Click any object in 3D viewport or hierarchy to inspect.");
             ImGui::End();
             return;
         }
 
         Entity e = m_selectedEntity;
 
-        // Name
+        // 1. Name & Top Action Bar
         if (registry().has<Name>(e)) {
             auto& n = registry().get<Name>(e);
             char nameBuf[128];
@@ -532,127 +1209,832 @@ void SceneEditor::renderInspector() {
                 n.value = nameBuf;
             }
         }
+        if (ImGui::Button("Duplicate (Ctrl+D)", ImVec2(160, 0))) {
+            duplicateEntity(e);
+            ImGui::End();
+            return;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", ImVec2(80, 0))) {
+            scene().destroy(e);
+            m_selectedEntity = NullEntity;
+            ImGui::End();
+            return;
+        }
 
         ImGui::Separator();
 
-        // Transform
+        // 2. Transform Component
         if (registry().has<Transform>(e) && ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& tr = registry().get<Transform>(e);
-            ImGui::DragFloat3("Position", &tr.position.x, 0.1f);
+            ImGui::DragFloat3("Position", &tr.position.x, 0.05f);
             ImGui::DragFloat3("Rotation", &tr.rotation.x, 0.5f);
-            ImGui::DragFloat3("Scale", &tr.scale.x, 0.05f, 0.001f, 100.0f);
-            if (ImGui::Button("Reset Transform")) {
-                tr.position = {0,0,0}; tr.rotation = {0,0,0}; tr.scale = {1,1,1};
+            ImGui::DragFloat3("Scale", &tr.scale.x, 0.02f, 0.001f, 100.0f);
+            
+            glm::vec3 fwd = tr.forward();
+            glm::vec3 right = tr.right();
+            ImGui::TextDisabled("Fwd: (%.2f, %.2f, %.2f) | Right: (%.2f, %.2f, %.2f)", fwd.x, fwd.y, fwd.z, right.x, right.y, right.z);
+
+            if (ImGui::Button("Reset Pos")) tr.position = {0,0,0};
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Rot")) tr.rotation = {0,0,0};
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Scale")) tr.scale = {1,1,1};
+        }
+
+        // 3. Camera Component
+        if (registry().has<Camera>(e) && ImGui::CollapsingHeader("Camera Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& cam = registry().get<Camera>(e);
+            ImGui::SliderFloat("Field of View", &cam.fov, 10.0f, 130.0f, "%.1f deg");
+            ImGui::DragFloat("Near Clip Plane", &cam.nearPlane, 0.01f, 0.001f, 10.0f);
+            ImGui::DragFloat("Far Clip Plane", &cam.farPlane, 1.0f, 1.0f, 10000.0f);
+            ImGui::Checkbox("Primary Camera", &cam.primary);
+            ImGui::Checkbox("Perspective", &cam.perspective);
+            if (!cam.perspective) {
+                ImGui::DragFloat("Ortho Size", &cam.orthoSize, 0.1f, 0.1f, 100.0f);
+            }
+
+            if (ImGui::Button("Align Editor View to this Camera")) {
+                auto& tr = registry().get<Transform>(e);
+                m_camPos = tr.position;
+                m_camPitch = tr.rotation.x;
+                m_camYaw = tr.rotation.y;
+                m_camFov = cam.fov;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Align Camera to Editor View")) {
+                auto& tr = registry().get<Transform>(e);
+                tr.position = m_camPos;
+                tr.rotation = {m_camPitch, m_camYaw, 0.0f};
+                cam.fov = m_camFov;
+            }
+
+            if (ImGui::Button("Remove Camera Component")) {
+                registry().remove<Camera>(e);
             }
         }
 
-        // MeshRenderer & Material
+        // 4. MeshRenderer & PBR Material
         if (registry().has<MeshRenderer>(e) && ImGui::CollapsingHeader("Mesh & Material", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& mr = registry().get<MeshRenderer>(e);
             ImGui::Checkbox("Visible", &mr.visible);
-            ImGui::Checkbox("ClusterLOD Active", &mr.clusterLOD);
+            ImGui::SameLine();
+            ImGui::Checkbox("Cast Shadows", &mr.castShadow);
+            ImGui::SameLine();
+            ImGui::Checkbox("ClusterLOD", &mr.clusterLOD);
 
-            ImGui::SeparatorText("PBR Material");
-            ImGui::ColorEdit3("Albedo", &mr.material.albedo.x);
+            char assetBuf[256];
+            strncpy(assetBuf, mr.assetPath.c_str(), sizeof(assetBuf));
+            if (ImGui::InputText("Model Path", assetBuf, sizeof(assetBuf))) {
+                mr.assetPath = assetBuf;
+            }
+
+            char texBuf[256];
+            strncpy(texBuf, mr.texturePath.c_str(), sizeof(texBuf));
+            if (ImGui::InputText("Texture Path", texBuf, sizeof(texBuf))) {
+                mr.texturePath = texBuf;
+                if (!mr.texturePath.empty()) {
+                    mr.material.diffuseMap = Assets::Texture(mr.texturePath, true);
+                    mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
+                }
+            }
+
+            ImGui::SeparatorText("PBR Material Properties");
+            ImGui::ColorEdit3("Albedo Tint", &mr.material.albedo.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_PickerHueWheel);
             ImGui::SliderFloat("Metallic", &mr.material.metallic, 0.0f, 1.0f);
             ImGui::SliderFloat("Roughness", &mr.material.roughness, 0.04f, 1.0f);
-            ImGui::SliderFloat("AO", &mr.material.ao, 0.0f, 1.0f);
-            ImGui::ColorEdit3("Emissive Color", &mr.material.emissive.x);
+            ImGui::SliderFloat("AO Intensity", &mr.material.ao, 0.0f, 1.0f);
+            ImGui::ColorEdit3("Emissive Color", &mr.material.emissive.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
 
-            ImGui::SeparatorText("Presets");
-            if (ImGui::Button("Gold")) { mr.material.albedo = {1.0f, 0.76f, 0.33f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.25f; }
+            ImGui::SeparatorText("Material Presets");
+            if (ImGui::Button("Gold")) { mr.material.albedo = {1.0f, 0.76f, 0.33f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.22f; }
             ImGui::SameLine();
             if (ImGui::Button("Chrome")) { mr.material.albedo = {0.95f, 0.95f, 0.95f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.08f; }
             ImGui::SameLine();
-            if (ImGui::Button("Rubber")) { mr.material.albedo = {0.1f, 0.1f, 0.1f}; mr.material.metallic = 0.0f; mr.material.roughness = 0.9f; }
+            if (ImGui::Button("Copper")) { mr.material.albedo = {0.95f, 0.64f, 0.54f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.3f; }
             ImGui::SameLine();
+            if (ImGui::Button("Rubber")) { mr.material.albedo = {0.1f, 0.1f, 0.1f}; mr.material.metallic = 0.0f; mr.material.roughness = 0.9f; }
+            
             if (ImGui::Button("Neon Cyan")) { mr.material.emissive = {0.0f, 8.5f, 10.0f}; }
+            ImGui::SameLine();
+            if (ImGui::Button("Hot Orange")) { mr.material.emissive = {10.0f, 3.5f, 0.0f}; }
+            ImGui::SameLine();
+            if (ImGui::Button("Laser Red")) { mr.material.emissive = {12.0f, 0.2f, 0.2f}; }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset PBR")) { mr.material = Material(); }
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Mesh Component")) {
+                registry().remove<MeshRenderer>(e);
+            }
         }
 
-        // Point Light
-        if (registry().has<PointLight>(e) && ImGui::CollapsingHeader("Point Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 5. Point Light Component
+        if (registry().has<PointLight>(e) && ImGui::CollapsingHeader("Point Light Component", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& pl = registry().get<PointLight>(e);
-            ImGui::ColorEdit3("Light Color", &pl.color.x);
-            ImGui::SliderFloat("Intensity", &pl.intensity, 0.0f, 50.0f, "%.1f");
-            ImGui::SliderFloat("Range (Radius)", &pl.range, 0.5f, 100.0f, "%.1f");
+            ImGui::ColorEdit3("Color", &pl.color.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_PickerHueWheel);
+            ImGui::SliderFloat("Intensity", &pl.intensity, 0.0f, 100.0f, "%.1f");
+            ImGui::SliderFloat("Range (Radius)", &pl.range, 0.1f, 100.0f, "%.1f m");
+            ImGui::DragFloat("Constant Atten", &pl.constant, 0.01f, 0.0f, 5.0f);
+            ImGui::DragFloat("Linear Atten", &pl.linear, 0.005f, 0.0f, 2.0f);
+            ImGui::DragFloat("Quadratic Atten", &pl.quadratic, 0.001f, 0.0f, 1.0f);
+
+            ImGui::SeparatorText("Presets");
+            if (ImGui::Button("3200K Halogen")) { pl.color = {1.0f, 0.82f, 0.62f}; pl.intensity = 6.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button("6500K Daylight")) { pl.color = {0.95f, 0.98f, 1.0f}; pl.intensity = 6.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button("Cyber Blue")) { pl.color = {0.05f, 0.6f, 1.0f}; pl.intensity = 10.0f; }
+            
+            if (ImGui::Button("Siren Red")) { pl.color = {1.0f, 0.05f, 0.1f}; pl.intensity = 10.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button("Emerald")) { pl.color = {0.1f, 1.0f, 0.35f}; pl.intensity = 8.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button("Candle")) { pl.color = {1.0f, 0.55f, 0.15f}; pl.intensity = 3.0f; }
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Light Component")) {
+                registry().remove<PointLight>(e);
+            }
         }
 
-        // Directional Light
-        if (registry().has<DirectionalLight>(e) && ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 6. Directional Light (Sun) Component
+        if (registry().has<DirectionalLight>(e) && ImGui::CollapsingHeader("Directional Light (Sun)", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& dl = registry().get<DirectionalLight>(e);
             ImGui::DragFloat3("Direction", &dl.direction.x, 0.02f, -1.0f, 1.0f);
-            if (ImGui::Button("Normalize Dir")) dl.direction = glm::normalize(dl.direction);
-            ImGui::ColorEdit3("Sun Color", &dl.color.x);
-            ImGui::SliderFloat("Sun Intensity", &dl.intensity, 0.0f, 10.0f);
+            if (ImGui::Button("Normalize Direction")) dl.direction = glm::normalize(dl.direction);
+            ImGui::ColorEdit3("Sun Color", &dl.color.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_PickerHueWheel);
+            ImGui::SliderFloat("Intensity (Lux)", &dl.intensity, 0.0f, 20.0f, "%.2f");
+
+            ImGui::SeparatorText("Sun Presets");
+            if (ImGui::Button("Noon Sun")) { dl.direction = glm::normalize(glm::vec3(-0.2f, -0.95f, -0.2f)); dl.color = {1.0f, 0.98f, 0.92f}; dl.intensity = 3.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button("Sunset")) { dl.direction = glm::normalize(glm::vec3(-0.85f, -0.2f, -0.3f)); dl.color = {1.0f, 0.55f, 0.25f}; dl.intensity = 3.5f; }
+            ImGui::SameLine();
+            if (ImGui::Button("Dawn")) { dl.direction = glm::normalize(glm::vec3(0.85f, -0.15f, 0.3f)); dl.color = {0.9f, 0.65f, 0.75f}; dl.intensity = 2.5f; }
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Sun Component")) {
+                registry().remove<DirectionalLight>(e);
+            }
         }
 
-        // Add Component menu
+        // 7. Spot Light Component
+        if (registry().has<SpotLight>(e) && ImGui::CollapsingHeader("Spot Light Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& sl = registry().get<SpotLight>(e);
+            ImGui::DragFloat3("Direction", &sl.direction.x, 0.02f, -1.0f, 1.0f);
+            ImGui::ColorEdit3("Color", &sl.color.x, ImGuiColorEditFlags_Float);
+            ImGui::SliderFloat("Intensity", &sl.intensity, 0.0f, 100.0f);
+            ImGui::SliderFloat("Cutoff Angle", &sl.cutoff, 1.0f, 89.0f);
+            ImGui::SliderFloat("Outer Cutoff", &sl.outerCutoff, 1.0f, 89.0f);
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Spot Light")) {
+                registry().remove<SpotLight>(e);
+            }
+        }
+
+        // 8. PhysX Rigidbody Component
+        if (registry().has<cjoka_phys::Rigidbody>(e) && ImGui::CollapsingHeader("PhysX Rigidbody Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& rb = registry().get<cjoka_phys::Rigidbody>(e);
+            const char* kinds[] = { "Static", "Dynamic", "Kinematic" };
+            int currentKind = (int)rb.kind;
+            if (ImGui::Combo("Body Type", &currentKind, kinds, IM_ARRAYSIZE(kinds))) {
+                rb.kind = (cjoka_phys::Rigidbody::Kind)currentKind;
+            }
+            ImGui::DragFloat("Density (kg/m3)", &rb.density, 0.1f, 0.01f, 10000.0f);
+            ImGui::DragFloat("Linear Damping", &rb.linearDamping, 0.01f, 0.0f, 10.0f);
+            ImGui::DragFloat("Angular Damping", &rb.angularDamping, 0.01f, 0.0f, 10.0f);
+            ImGui::Checkbox("Use Gravity", &rb.gravity);
+            ImGui::Checkbox("Continuous CD (CCD)", &rb.ccd);
+
+            ImGui::SeparatorText("Lock Rotation Constraints");
+            ImGui::Checkbox("Lock X", &rb.lockRotationX); ImGui::SameLine();
+            ImGui::Checkbox("Lock Y", &rb.lockRotationY); ImGui::SameLine();
+            ImGui::Checkbox("Lock Z", &rb.lockRotationZ);
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Rigidbody")) {
+                registry().remove<cjoka_phys::Rigidbody>(e);
+            }
+        }
+
+        // 9. PhysX Collider Component
+        if (registry().has<cjoka_phys::Collider>(e) && ImGui::CollapsingHeader("PhysX Collider Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& col = registry().get<cjoka_phys::Collider>(e);
+            const char* shapeTypes[] = { "Box", "Sphere", "Capsule", "Plane" };
+            int currentType = (int)col.type;
+            if (ImGui::Combo("Collider Shape", &currentType, shapeTypes, IM_ARRAYSIZE(shapeTypes))) {
+                col.type = (cjoka_phys::ColliderType)currentType;
+            }
+            if (col.type == cjoka_phys::ColliderType::Box) {
+                ImGui::DragFloat3("Half Extents", &col.halfExtents.x, 0.05f, 0.01f, 100.0f);
+            } else if (col.type == cjoka_phys::ColliderType::Sphere) {
+                ImGui::DragFloat("Radius", &col.radius, 0.05f, 0.01f, 100.0f);
+            } else if (col.type == cjoka_phys::ColliderType::Capsule) {
+                ImGui::DragFloat("Capsule Radius", &col.radius, 0.05f, 0.01f, 50.0f);
+                ImGui::DragFloat("Capsule Height", &col.height, 0.05f, 0.01f, 50.0f);
+            }
+
+            ImGui::DragFloat3("Center Offset", &col.centerOffset.x, 0.05f);
+            ImGui::SliderFloat("Static Friction", &col.staticFriction, 0.0f, 1.5f);
+            ImGui::SliderFloat("Dynamic Friction", &col.dynamicFriction, 0.0f, 1.5f);
+            ImGui::SliderFloat("Restitution (Bounciness)", &col.restitution, 0.0f, 1.0f);
+            ImGui::Checkbox("Is Trigger", &col.isTrigger);
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Collider")) {
+                registry().remove<cjoka_phys::Collider>(e);
+            }
+        }
+
+        // 10. Character Controller Component
+        if (registry().has<CharacterController>(e) && ImGui::CollapsingHeader("Character Controller Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& cc = registry().get<CharacterController>(e);
+            ImGui::DragFloat("Radius", &cc.radius, 0.02f, 0.1f, 5.0f);
+            ImGui::DragFloat("Height", &cc.height, 0.05f, 0.1f, 10.0f);
+            ImGui::DragFloat("Walk Speed", &cc.speed, 0.1f, 0.0f, 50.0f);
+            ImGui::DragFloat("Jump Force", &cc.jumpForce, 0.1f, 0.0f, 30.0f);
+            ImGui::Text("Grounded: %s | Vel Y: %.2f", cc.onGround ? "YES" : "NO", cc.velocity.y);
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Character Controller")) {
+                registry().remove<CharacterController>(e);
+            }
+        }
+
+        // 11. Atmosphere / Sky Component
+        if (registry().has<Sky>(e) && ImGui::CollapsingHeader("Sky & Atmosphere Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& sky = registry().get<Sky>(e);
+            ImGui::ColorEdit3("Top Color", &sky.top.x, ImGuiColorEditFlags_Float);
+            ImGui::ColorEdit3("Horizon Color", &sky.horizon.x, ImGuiColorEditFlags_Float);
+            ImGui::ColorEdit3("Bottom Color", &sky.bottom.x, ImGuiColorEditFlags_Float);
+            ImGui::SliderFloat("Exposure", &sky.exposure, 0.1f, 5.0f);
+
+            if (ImGui::Button("Clear Day")) sky = Sky::ClearDay();
+            ImGui::SameLine();
+            if (ImGui::Button("Sunset")) sky = Sky::Sunset();
+            ImGui::SameLine();
+            if (ImGui::Button("Night")) sky = Sky::Night();
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Sky Component")) {
+                registry().remove<Sky>(e);
+            }
+        }
+
+        // 12. Fog Component
+        if (registry().has<Fog>(e) && ImGui::CollapsingHeader("Fog Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& fog = registry().get<Fog>(e);
+            ImGui::ColorEdit3("Fog Color", &fog.color.x, ImGuiColorEditFlags_Float);
+            ImGui::SliderFloat("Fog Density", &fog.density, 0.0001f, 0.05f, "%.5f");
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Fog Component")) {
+                registry().remove<Fog>(e);
+            }
+        }
+
+        // 13. Post Process Settings Component
+        if (registry().has<PostProcessSettings>(e) && ImGui::CollapsingHeader("Post Process Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& pp = registry().get<PostProcessSettings>(e);
+            ImGui::SliderFloat("Bloom Threshold", &pp.bloomThreshold, 0.0f, 3.0f);
+            ImGui::SliderFloat("Bloom Intensity", &pp.bloomIntensity, 0.0f, 3.0f);
+            ImGui::SliderFloat("Exposure", &pp.exposure, 0.1f, 5.0f);
+            ImGui::SliderFloat("Vignette", &pp.vignette, 0.0f, 1.0f);
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Post Process")) {
+                registry().remove<PostProcessSettings>(e);
+            }
+        }
+
+        // 14. Audio Source Component
+        if (registry().has<Audio::AudioSourceComponent>(e) && ImGui::CollapsingHeader("Audio Source Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& as = registry().get<Audio::AudioSourceComponent>(e);
+            char fileBuf[256];
+            strncpy(fileBuf, as.filepath.c_str(), sizeof(fileBuf));
+            if (ImGui::InputText("Sound File", fileBuf, sizeof(fileBuf))) {
+                as.filepath = fileBuf;
+            }
+            ImGui::SliderFloat("Volume", &as.volume, 0.0f, 2.0f);
+            ImGui::SliderFloat("Pitch", &as.pitch, 0.1f, 3.0f);
+            ImGui::Checkbox("Looping", &as.loop);
+            ImGui::Checkbox("3D Spatial Audio", &as.spatial);
+            if (as.spatial) {
+                ImGui::DragFloat("Min Distance", &as.minDistance, 0.1f, 0.1f, 50.0f);
+                ImGui::DragFloat("Max Distance", &as.maxDistance, 0.5f, 1.0f, 500.0f);
+            }
+
+            if (ImGui::Button("Play Audio", ImVec2(120, 0))) {
+                as.play();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Stop Audio", ImVec2(120, 0))) {
+                as.stop();
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Remove Audio Source")) {
+                registry().remove<Audio::AudioSourceComponent>(e);
+            }
+        }
+
+        // 15. Native C++ Script Component
+        if (registry().has<NativeScript>(e) && ImGui::CollapsingHeader("C++ Script Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& ns = registry().get<NativeScript>(e);
+            ImGui::Text("Script: %s", ns.scriptName.c_str());
+            if (!ns.instance && ns.instantiate) {
+                ns.instance = ns.instantiate();
+                ns.instance->_init(e, &registry());
+                ns.instance->onCreate();
+            }
+            if (ns.instance) {
+                ImGui::Separator();
+                ns.instance->onInspectorGUI();
+            }
+            ImGui::Separator();
+            if (ImGui::Button("Remove Script Component")) {
+                registry().remove<NativeScript>(e);
+            }
+        }
+
+        // 16. Big, Categorized & Searchable "+ Add Component" Button
         ImGui::Separator();
-        if (ImGui::Button("+ Add Point Light")) {
-            if (!registry().has<PointLight>(e)) registry().emplace<PointLight>(e, PointLight{{1.0f, 0.9f, 0.8f}, 5.0f, 15.0f});
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.45f, 0.75f, 1.0f));
+        if (ImGui::Button("+ Add Component", ImVec2(-1, 38))) {
+            ImGui::OpenPopup("AddComponentPopup");
+        }
+        ImGui::PopStyleColor();
+
+        if (ImGui::BeginPopup("AddComponentPopup")) {
+            static char compSearch[64] = "";
+            ImGui::InputTextWithHint("##CompSearch", "Search components...", compSearch, sizeof(compSearch));
+            ImGui::Separator();
+
+            std::string filter = compSearch;
+            std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
+
+            auto matches = [&](const std::string& name) {
+                if (filter.empty()) return true;
+                std::string lower = name;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                return lower.find(filter) != std::string::npos;
+            };
+
+            // Mesh & Rendering
+            if (ImGui::BeginMenu("Mesh & Rendering")) {
+                if (!registry().has<MeshRenderer>(e) && matches("Mesh Renderer") && ImGui::MenuItem("Mesh Renderer")) {
+                    Material m; m.albedo = {0.85f, 0.85f, 0.88f}; m.metallic = 0.2f; m.roughness = 0.4f;
+                    MeshRenderer mr(Assets::Cube(1.0f), m);
+                    mr.assetPath = "primitive:cube";
+                    registry().emplace<MeshRenderer>(e, mr);
+                }
+                if (!registry().has<Decal>(e) && matches("Decal") && ImGui::MenuItem("Decal Projector")) {
+                    registry().emplace<Decal>(e);
+                }
+                ImGui::EndMenu();
+            }
+
+            // Physics
+            if (ImGui::BeginMenu("Physics (PhysX 5.5)")) {
+                if (!registry().has<cjoka_phys::Rigidbody>(e) && matches("Rigidbody Dynamic") && ImGui::MenuItem("Rigidbody (Dynamic)")) {
+                    registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody::Dynamic(1.0f));
+                }
+                if (!registry().has<cjoka_phys::Rigidbody>(e) && matches("Rigidbody Static") && ImGui::MenuItem("Rigidbody (Static)")) {
+                    registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody::Static());
+                }
+                if (!registry().has<cjoka_phys::Rigidbody>(e) && matches("Rigidbody Kinematic") && ImGui::MenuItem("Rigidbody (Kinematic)")) {
+                    registry().emplace<cjoka_phys::Rigidbody>(e, cjoka_phys::Rigidbody::Kinematic());
+                }
+                if (!registry().has<cjoka_phys::Collider>(e) && matches("Box Collider") && ImGui::MenuItem("Box Collider")) {
+                    registry().emplace<cjoka_phys::Collider>(e, cjoka_phys::Collider::Box({0.5f, 0.5f, 0.5f}));
+                }
+                if (!registry().has<cjoka_phys::Collider>(e) && matches("Sphere Collider") && ImGui::MenuItem("Sphere Collider")) {
+                    registry().emplace<cjoka_phys::Collider>(e, cjoka_phys::Collider::Sphere(0.5f));
+                }
+                if (!registry().has<cjoka_phys::Collider>(e) && matches("Capsule Collider") && ImGui::MenuItem("Capsule Collider")) {
+                    registry().emplace<cjoka_phys::Collider>(e, cjoka_phys::Collider::Capsule(0.35f, 1.2f));
+                }
+                if (!registry().has<CharacterController>(e) && matches("Character Controller") && ImGui::MenuItem("Character Controller")) {
+                    registry().emplace<CharacterController>(e);
+                }
+                ImGui::EndMenu();
+            }
+
+            // Lighting & Atmosphere
+            if (ImGui::BeginMenu("Lighting & Environment")) {
+                if (!registry().has<PointLight>(e) && matches("Point Light") && ImGui::MenuItem("Point Light")) {
+                    registry().emplace<PointLight>(e, PointLight{{1.0f, 0.9f, 0.8f}, 6.0f, 16.0f});
+                }
+                if (!registry().has<DirectionalLight>(e) && matches("Directional Light") && ImGui::MenuItem("Directional Light (Sun)")) {
+                    registry().emplace<DirectionalLight>(e, DirectionalLight{glm::normalize(glm::vec3{-0.4f, -0.8f, -0.3f}), {1.0f, 0.95f, 0.85f}, 2.5f});
+                }
+                if (!registry().has<SpotLight>(e) && matches("Spot Light") && ImGui::MenuItem("Spot Light")) {
+                    registry().emplace<SpotLight>(e);
+                }
+                if (!registry().has<Sky>(e) && matches("Sky Atmosphere") && ImGui::MenuItem("Sky & Atmosphere")) {
+                    registry().emplace<Sky>(e, Sky::ClearDay());
+                }
+                if (!registry().has<Fog>(e) && matches("Fog") && ImGui::MenuItem("Fog Effect")) {
+                    registry().emplace<Fog>(e, Fog{{0.2f, 0.22f, 0.28f}, 0.003f});
+                }
+                if (!registry().has<PostProcessSettings>(e) && matches("Post Process Settings") && ImGui::MenuItem("Post Process Settings")) {
+                    registry().emplace<PostProcessSettings>(e, PostProcessSettings::Cinematic());
+                }
+                ImGui::EndMenu();
+            }
+
+            // Camera & Audio
+            if (ImGui::BeginMenu("Camera & Audio")) {
+                if (!registry().has<Camera>(e) && matches("Camera") && ImGui::MenuItem("Camera")) {
+                    registry().emplace<Camera>(e, Camera{65.0f, 0.1f, 1000.0f, true, true, 10.0f});
+                }
+                if (!registry().has<Audio::AudioSourceComponent>(e) && matches("Audio Source") && ImGui::MenuItem("Audio Source")) {
+                    registry().emplace<Audio::AudioSourceComponent>(e);
+                }
+                if (!registry().has<Audio::AudioListenerComponent>(e) && matches("Audio Listener") && ImGui::MenuItem("Audio Listener")) {
+                    registry().emplace<Audio::AudioListenerComponent>(e);
+                }
+                ImGui::EndMenu();
+            }
+
+            // C++ Game Scripts
+            if (ImGui::BeginMenu("C++ Game Scripts")) {
+                for (const auto& [scriptName, factory] : ScriptRegistry::Get().allScripts()) {
+                    if (matches(scriptName) && ImGui::MenuItem(scriptName.c_str())) {
+                        auto& ns = registry().has<NativeScript>(e) ? registry().get<NativeScript>(e) : registry().emplace<NativeScript>(e);
+                        ns.scriptName = scriptName;
+                        ns.instantiate = factory;
+                        ns.instance = factory();
+                        if (ns.instance) {
+                            ns.instance->_init(e, &registry());
+                            ns.instance->onCreate();
+                            ns.instance->onStart();
+                        }
+                    }
+                }
+                ImGui::EndMenu();
+            }
+
+            ImGui::EndPopup();
         }
     }
     ImGui::End();
 }
 
-void SceneEditor::renderSpawner() {
-    ImGui::SetNextWindowPos(ImVec2(16, 530), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300, 330), ImGuiCond_FirstUseEver);
+void SceneEditor::renderCameraPreview() {
+    if (!registry().valid(m_selectedEntity) || !registry().has<Camera>(m_selectedEntity)) return;
 
-    if (ImGui::Begin("Asset Spawner", nullptr)) {
-        glm::vec3 spawnPos = m_camPos + glm::vec3(0, 0, 4);
+    auto& camComp = registry().get<Camera>(m_selectedEntity);
+    auto& camTr = registry().get<Transform>(m_selectedEntity);
+    std::string name = registry().has<Name>(m_selectedEntity) ? registry().get<Name>(m_selectedEntity).value : "Camera";
 
-        ImGui::SeparatorText("Primitives");
-        if (ImGui::Button("+ Cube", ImVec2(80, 0))) m_selectedEntity = spawnPrimitive("Cube", spawnPos);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Sphere", ImVec2(80, 0))) m_selectedEntity = spawnPrimitive("Sphere", spawnPos);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Plane", ImVec2(80, 0))) m_selectedEntity = spawnPrimitive("Plane", spawnPos);
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 380.0f - 290.0f, io.DisplaySize.y - 215.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(280.0f, 195.0f), ImGuiCond_Always);
 
-        ImGui::SeparatorText("Lighting");
-        if (ImGui::Button("+ Warm Light", ImVec2(120, 0))) m_selectedEntity = spawnPointLight(spawnPos, {1.0f, 0.85f, 0.65f}, 5.0f, 15.0f);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Blue Neon", ImVec2(120, 0))) m_selectedEntity = spawnPointLight(spawnPos, {0.1f, 0.7f, 1.0f}, 7.0f, 18.0f);
+    if (ImGui::Begin("Camera Preview", &m_showCameraPreview, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize)) {
+        ImGui::Text("Preview: %s", name.c_str());
+        ImGui::TextDisabled("FOV: %.1f | Near: %.2f | Far: %.1f", camComp.fov, camComp.nearPlane, camComp.farPlane);
 
-        if (ImGui::Button("+ Crimson Light", ImVec2(120, 0))) m_selectedEntity = spawnPointLight(spawnPos, {1.0f, 0.15f, 0.25f}, 7.0f, 18.0f);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Emerald Light", ImVec2(120, 0))) m_selectedEntity = spawnPointLight(spawnPos, {0.1f, 1.0f, 0.4f}, 7.0f, 18.0f);
+        glm::vec3 fwd = camTr.forward();
+        ImGui::Text("Direction: (%.2f, %.2f, %.2f)", fwd.x, fwd.y, fwd.z);
 
-        ImGui::SeparatorText("Vehicles & Props");
-        if (ImGui::Button("+ Sports Sedan", ImVec2(120, 0)))
-            m_selectedEntity = spawnModel("SportsSedan", "assets/models/cars/sedan-sports.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Police Car", ImVec2(120, 0)))
-            m_selectedEntity = spawnModel("PoliceCruiser", "assets/models/cars/police.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
+        if (ImGui::Button("Set Primary Camera", ImVec2(-1, 28))) {
+            for (Entity ent : registry().view<Camera>()) {
+                registry().get<Camera>(ent).primary = (ent == m_selectedEntity);
+            }
+        }
 
-        if (ImGui::Button("+ Taxi", ImVec2(120, 0)))
-            m_selectedEntity = spawnModel("Taxi", "assets/models/cars/taxi.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
-        ImGui::SameLine();
-        if (ImGui::Button("+ SUV", ImVec2(120, 0)))
-            m_selectedEntity = spawnModel("SUV", "assets/models/cars/suv.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
-
-        if (ImGui::Button("+ Bench", ImVec2(80, 0)))
-            m_selectedEntity = spawnModel("Bench", "assets/models/bench.obj", "", spawnPos, 1.3f);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Barrel", ImVec2(80, 0)))
-            m_selectedEntity = spawnModel("Barrel", "assets/models/barrel.obj", "assets/textures/barrel.png", spawnPos, 1.2f);
-        ImGui::SameLine();
-        if (ImGui::Button("+ Plant", ImVec2(80, 0)))
-            m_selectedEntity = spawnModel("Plant", "assets/models/indoor_plant.obj", "assets/textures/indoor_plant_COL.jpg", spawnPos, 0.25f);
+        if (ImGui::Button("Match Scene View to Camera", ImVec2(-1, 28))) {
+            m_camPos = camTr.position;
+            m_camPitch = camTr.rotation.x;
+            m_camYaw = camTr.rotation.y;
+            m_camFov = camComp.fov;
+        }
     }
     ImGui::End();
+}
+
+void SceneEditor::renderAssetBrowser() {
+    int w, h; window().getFramebufferSize(w, h);
+    ImGui::SetNextWindowPos(ImVec2(16.0f, (float)h - 225.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2((float)w - 32.0f, 210.0f), ImGuiCond_Always);
+
+    if (ImGui::Begin("Asset Browser", &m_showAssetBrowser)) {
+        glm::vec3 spawnPos = m_camPos + glm::vec3(0, 0, 4);
+
+        if (ImGui::BeginTabBar("AssetCategories")) {
+            if (ImGui::BeginTabItem("File Explorer")) {
+                // Breadcrumbs & Navigation Bar
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.25f, 0.35f, 1.0f));
+                if (m_currentDirectory != "assets") {
+                    if (ImGui::Button("[ < Back ]")) {
+                        m_currentDirectory = m_currentDirectory.parent_path();
+                    }
+                    ImGui::SameLine();
+                }
+                ImGui::Text("Directory: %s", m_currentDirectory.string().c_str());
+                ImGui::PopStyleColor();
+                ImGui::Separator();
+
+                // Folder & File Cards
+                ImGui::BeginChild("FilesView", ImVec2(0, 0), true);
+                if (std::filesystem::exists(m_currentDirectory)) {
+                    for (const auto& entry : std::filesystem::directory_iterator(m_currentDirectory)) {
+                        const auto& p = entry.path();
+                        std::string filename = p.filename().string();
+                        if (filename.empty() || filename[0] == '.') continue;
+
+                        if (entry.is_directory()) {
+                            std::string label = "[Folder] " + filename;
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.3f, 0.4f, 0.9f));
+                            if (ImGui::Button(label.c_str(), ImVec2(130, 45))) {
+                                m_currentDirectory /= p.filename();
+                            }
+                            ImGui::PopStyleColor();
+                            ImGui::SameLine();
+                        } else {
+                            std::string ext = p.extension().string();
+                            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+                            if (ext == ".obj") {
+                                std::string label = "[3D Model]\n" + filename;
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.4f, 0.25f, 0.9f));
+                                if (ImGui::Button(label.c_str(), ImVec2(140, 45))) {
+                                    std::string tex = "";
+                                    std::string candTex = p.parent_path().string() + "/" + p.stem().string() + ".png";
+                                    if (std::filesystem::exists(candTex)) tex = candTex;
+                                    else if (std::filesystem::exists("assets/textures/colormap.png")) tex = "assets/textures/colormap.png";
+                                    m_selectedEntity = spawnModel(p.stem().string(), p.string(), tex, spawnPos, 1.0f);
+                                }
+                                ImGui::PopStyleColor();
+                                ImGui::SameLine();
+                            } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
+                                std::string label = "[Texture]\n" + filename;
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.3f, 0.2f, 0.9f));
+                                if (ImGui::Button(label.c_str(), ImVec2(130, 45))) {
+                                    if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                                        auto& mr = registry().get<MeshRenderer>(m_selectedEntity);
+                                        mr.texturePath = p.string();
+                                        mr.material.diffuseMap = Assets::Texture(p.string(), true);
+                                        mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
+                                    }
+                                }
+                                ImGui::PopStyleColor();
+                                ImGui::SameLine();
+                            } else if (ext == ".json") {
+                                std::string label = "[Scene]\n" + filename;
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.2f, 0.4f, 0.9f));
+                                if (ImGui::Button(label.c_str(), ImVec2(130, 45))) {
+                                    loadSceneFromFile(p.string());
+                                    strncpy(m_sceneFileBuf, p.string().c_str(), sizeof(m_sceneFileBuf));
+                                }
+                                ImGui::PopStyleColor();
+                                ImGui::SameLine();
+                            }
+                        }
+                    }
+                }
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Models & Vehicles")) {
+                ImGui::TextDisabled("Click any asset to spawn into current camera view:");
+                ImGui::Separator();
+
+                if (ImGui::Button("Assemble Modular Vehicle\n(Chassis + 4 Wheels + Lights)", ImVec2(240, 50)))
+                    m_selectedEntity = assembleModularVehicle(spawnPos);
+
+                ImGui::Separator();
+
+                if (ImGui::Button("Police Cruiser\n(police.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("PoliceCruiser", "assets/models/cars/police.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
+                ImGui::SameLine();
+                if (ImGui::Button("Sports Sedan\n(sedan-sports.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("SportsSedan", "assets/models/cars/sedan-sports.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
+                ImGui::SameLine();
+                if (ImGui::Button("City Taxi\n(taxi.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("Taxi", "assets/models/cars/taxi.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
+                ImGui::SameLine();
+                if (ImGui::Button("SUV Truck\n(suv.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("SUV", "assets/models/cars/suv.obj", "assets/textures/colormap.png", spawnPos, 1.4f);
+                ImGui::SameLine();
+                if (ImGui::Button("Park Bench\n(bench.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("Bench", "assets/models/bench.obj", "", spawnPos, 1.3f);
+                ImGui::SameLine();
+                if (ImGui::Button("Metal Barrel\n(barrel.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("Barrel", "assets/models/barrel.obj", "assets/textures/barrel.png", spawnPos, 1.2f);
+                ImGui::SameLine();
+                if (ImGui::Button("Indoor Plant\n(plant.obj)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnModel("Plant", "assets/models/indoor_plant.obj", "assets/textures/indoor_plant_COL.jpg", spawnPos, 0.25f);
+                
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Lights & FX")) {
+                ImGui::TextDisabled("Instant PBR point lights and neon emitters:");
+                ImGui::Separator();
+
+                if (ImGui::Button("Warm Halogen (3200K)\n[+ Light]", ImVec2(160, 50)))
+                    m_selectedEntity = spawnPointLight(spawnPos, {1.0f, 0.85f, 0.65f}, 6.0f, 18.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("Cyberpunk Cyan\n[+ Light]", ImVec2(160, 50)))
+                    m_selectedEntity = spawnPointLight(spawnPos, {0.1f, 0.75f, 1.0f}, 8.0f, 20.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("Police Siren Red\n[+ Light]", ImVec2(160, 50)))
+                    m_selectedEntity = spawnPointLight(spawnPos, {1.0f, 0.08f, 0.12f}, 8.0f, 20.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("Emerald Neon\n[+ Light]", ImVec2(160, 50)))
+                    m_selectedEntity = spawnPointLight(spawnPos, {0.1f, 1.0f, 0.35f}, 8.0f, 20.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("Magenta Neon\n[+ Light]", ImVec2(160, 50)))
+                    m_selectedEntity = spawnPointLight(spawnPos, {0.95f, 0.1f, 0.85f}, 8.0f, 20.0f);
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Primitives")) {
+                ImGui::TextDisabled("Physics & collision test primitives:");
+                ImGui::Separator();
+
+                if (ImGui::Button("PBR Cube\n(1x1x1)", ImVec2(130, 50)))
+                    m_selectedEntity = spawnPrimitive("Cube", spawnPos);
+                ImGui::SameLine();
+                if (ImGui::Button("PBR Sphere\n(Radius 0.5)", ImVec2(130, 50)))
+                    m_selectedEntity = spawnPrimitive("Sphere", spawnPos);
+                ImGui::SameLine();
+                if (ImGui::Button("Mirror Floor Plane\n(10x10)", ImVec2(140, 50)))
+                    m_selectedEntity = spawnPrimitive("Plane", spawnPos);
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("C++ Scripts")) {
+                ImGui::Text("Native C++ Script Engine (C++20 Hot-Reload)");
+                ImGui::Separator();
+
+                // Create new script generator
+                static char newScriptNameBuf[64] = "MyPlayerScript";
+                ImGui::InputText("New Script Class", newScriptNameBuf, sizeof(newScriptNameBuf));
+                ImGui::SameLine();
+                if (ImGui::Button("+ Create C++ Script File", ImVec2(190, 0))) {
+                    createNewScriptFile(newScriptNameBuf);
+                }
+
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "[Active] Registered C++ Game Scripts:");
+                for (const auto& [scriptName, factory] : ScriptRegistry::Get().allScripts()) {
+                    ImGui::BulletText("%s", scriptName.c_str());
+                    ImGui::SameLine(180.0f);
+                    if (registry().valid(m_selectedEntity)) {
+                        std::string btnLabel = "Attach to Selected##" + scriptName;
+                        if (ImGui::Button(btnLabel.c_str())) {
+                            auto& ns = registry().has<NativeScript>(m_selectedEntity) ? registry().get<NativeScript>(m_selectedEntity) : registry().emplace<NativeScript>(m_selectedEntity);
+                            ns.scriptName = scriptName;
+                            ns.instantiate = factory;
+                            ns.instance = factory();
+                            if (ns.instance) {
+                                ns.instance->_init(m_selectedEntity, &registry());
+                                ns.instance->onCreate();
+                            }
+                        }
+                    }
+                }
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
+}
+
+Entity SceneEditor::duplicateEntity(Entity e) {
+    if (!registry().valid(e)) return NullEntity;
+
+    std::string newName = "Entity_Copy";
+    if (registry().has<Name>(e)) newName = registry().get<Name>(e).value + "_Copy";
+
+    Transform newTr;
+    if (registry().has<Transform>(e)) {
+        newTr = registry().get<Transform>(e);
+        newTr.position += glm::vec3(1.5f, 0.0f, 1.5f);
+    }
+
+    auto ref = scene().create(newName, newTr);
+    Entity newEnt = ref.id();
+
+    if (registry().has<MeshRenderer>(e)) {
+        ref.add<MeshRenderer>(registry().get<MeshRenderer>(e));
+    }
+    if (registry().has<PointLight>(e)) {
+        ref.add<PointLight>(registry().get<PointLight>(e));
+    }
+    if (registry().has<NativeScript>(e)) {
+        auto& oldNs = registry().get<NativeScript>(e);
+        auto& newNs = ref.add<NativeScript>();
+        newNs.scriptName = oldNs.scriptName;
+        newNs.instantiate = oldNs.instantiate;
+        if (newNs.instantiate) {
+            newNs.instance = newNs.instantiate();
+            if (newNs.instance) {
+                newNs.instance->_init(newEnt, &registry());
+                newNs.instance->onCreate();
+            }
+        }
+    }
+    m_selectedEntity = newEnt;
+    std::cout << "[SceneEditor] Duplicated Entity: " << (uint32_t)e << " -> " << (uint32_t)newEnt << " (" << newName << ")\n";
+    return newEnt;
+}
+
+Entity SceneEditor::assembleModularVehicle(const glm::vec3& pos) {
+    // 1. Root vehicle chassis
+    Entity root = spawnModel("CustomCar_Chassis", "assets/models/cars/police.obj", "assets/textures/colormap.png", pos, 1.4f);
+    
+    // Attach Vehicle driver script
+    auto& ns = registry().has<NativeScript>(root) ? registry().get<NativeScript>(root) : registry().emplace<NativeScript>(root);
+    ns.scriptName = "Vehicle Driver";
+    auto factory = ScriptRegistry::Get().create("Vehicle Driver");
+    if (factory) {
+        ns.instantiate = []() { return ScriptRegistry::Get().create("Vehicle Driver"); };
+        ns.instance = ns.instantiate();
+        if (ns.instance) {
+            ns.instance->_init(root, &registry());
+            ns.instance->onCreate();
+        }
+    }
+
+    // 2. Wheels
+    auto wheelTex = Assets::Texture("assets/textures/wheel.png", true);
+    Material wheelMat = Material::Textured(wheelTex, {0.15f, 0.15f, 0.15f}, 0.1f, 0.9f);
+
+    auto spawnWheel = [&](const std::string& name, const glm::vec3& offset) {
+        auto wRef = scene().create(name, Transform{pos + offset, {0, 0, 0}, {0.6f, 0.6f, 0.35f}});
+        MeshRenderer wMr(Assets::Sphere(0.35f), wheelMat);
+        wMr.assetPath = "primitive:sphere";
+        wRef.add<MeshRenderer>(wMr);
+    };
+
+    spawnWheel("Wheel_FL", {-1.1f, -0.2f, 1.3f});
+    spawnWheel("Wheel_FR", { 1.1f, -0.2f, 1.3f});
+    spawnWheel("Wheel_RL", {-1.1f, -0.2f, -1.3f});
+    spawnWheel("Wheel_RR", { 1.1f, -0.2f, -1.3f});
+
+    // 3. Headlights (dual point lights)
+    spawnPointLight(pos + glm::vec3(-0.6f, 0.3f, 2.0f), {1.0f, 0.95f, 0.8f}, 5.0f, 15.0f);
+    spawnPointLight(pos + glm::vec3( 0.6f, 0.3f, 2.0f), {1.0f, 0.95f, 0.8f}, 5.0f, 15.0f);
+
+    m_selectedEntity = root;
+    std::cout << "[SceneEditor] Assembled complete modular vehicle at pos: " << pos.x << ", " << pos.y << ", " << pos.z << "\n";
+    return root;
+}
+
+void SceneEditor::createNewScriptFile(const std::string& scriptName) {
+    std::filesystem::create_directories("assets/scripts");
+    std::string filename = "assets/scripts/" + scriptName + ".h";
+    std::ofstream out(filename);
+    if (!out.is_open()) return;
+
+    out << "#pragma once\n"
+        << "#include \"engine/Scripting/ScriptableEntity.h\"\n"
+        << "#include <imgui.h>\n"
+        << "#include <iostream>\n\n"
+        << "class " << scriptName << " : public ScriptableEntity {\n"
+        << "public:\n"
+        << "    float speed = 10.0f;\n"
+        << "    bool active = true;\n\n"
+        << "    void onStart() override {\n"
+        << "        std::cout << \"[" << scriptName << "] Started!\\n\";\n"
+        << "    }\n\n"
+        << "    void onUpdate(float dt) override {\n"
+        << "        if (!active) return;\n"
+        << "        // Custom gameplay logic here\n"
+        << "    }\n\n"
+        << "    void onInspectorGUI() override {\n"
+        << "        ImGui::Text(\"" << scriptName << " Settings\");\n"
+        << "        ImGui::Checkbox(\"Active\", &active);\n"
+        << "        ImGui::SliderFloat(\"Speed\", &speed, 0.0f, 100.0f);\n"
+        << "    }\n"
+        << "};\n"
+        << "REGISTER_SCRIPT(" << scriptName << ", \"" << scriptName << "\")\n";
+    out.close();
+    std::cout << "[SceneEditor] Created user script template: " << filename << "\n";
 }
 
 void SceneEditor::renderAtmosphereEditor() {
-    ImGui::SetNextWindowPos(ImVec2(1600 - 360, 725), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(340, 150), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(1600 - 410, 48), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(395, 380), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Atmosphere & Sky", nullptr)) {
+    if (ImGui::Begin("Atmosphere & Sky", &m_showAtmosphereEditor)) {
         if (ImGui::Button("Sunset")) {
             if (auto v = registry().view<Sky>(); v.begin() != v.end()) registry().get<Sky>(*v.begin()) = Sky::Sunset();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Night")) {
+        if (ImGui::Button("Night Sky")) {
             if (auto v = registry().view<Sky>(); v.begin() != v.end()) registry().get<Sky>(*v.begin()) = Sky::Night();
         }
         ImGui::SameLine();
@@ -660,14 +2042,204 @@ void SceneEditor::renderAtmosphereEditor() {
             if (auto v = registry().view<Sky>(); v.begin() != v.end()) registry().get<Sky>(*v.begin()) = Sky::ClearDay();
         }
 
-        if (auto v = registry().view<Fog>(); v.begin() != v.end()) {
-            auto& f = registry().get<Fog>(*v.begin());
-            ImGui::SliderFloat("Fog Density", &f.density, 0.0f, 0.02f, "%.4f");
-            ImGui::ColorEdit3("Fog Color", &f.color.x);
+        if (auto v = registry().view<Sky>(); v.begin() != v.end()) {
+            auto& sky = registry().get<Sky>(*v.begin());
+            ImGui::SeparatorText("Sky Gradients");
+            ImGui::ColorEdit3("Zenith (Top)", &sky.top.r);
+            ImGui::ColorEdit3("Horizon", &sky.horizon.r);
+            ImGui::ColorEdit3("Ground (Bottom)", &sky.bottom.r);
+            ImGui::SliderFloat("Sky Exposure", &sky.exposure, 0.1f, 3.0f);
         }
-        if (auto v = registry().view<PostProcessSettings>(); v.begin() != v.end()) {
-            auto& post = registry().get<PostProcessSettings>(*v.begin());
-            ImGui::SliderFloat("Exposure", &post.exposure, 0.1f, 3.0f);
+
+        if (auto v = registry().view<DirectionalLight>(); v.begin() != v.end()) {
+            auto& sun = registry().get<DirectionalLight>(*v.begin());
+            ImGui::SeparatorText("Sun Directional Light");
+            ImGui::DragFloat3("Sun Direction", &sun.direction.x, 0.02f, -1.0f, 1.0f);
+            if (ImGui::Button("Normalize Sun Dir")) sun.direction = glm::normalize(sun.direction);
+            ImGui::ColorEdit3("Sun Color", &sun.color.r);
+            ImGui::SliderFloat("Sun Lux Intensity", &sun.intensity, 0.0f, 30.0f, "%.2f Lux");
+        }
+
+        if (auto v = registry().view<Fog>(); v.begin() != v.end()) {
+            auto& fog = registry().get<Fog>(*v.begin());
+            ImGui::SeparatorText("Atmospheric Distance Fog");
+            ImGui::ColorEdit3("Fog Color", &fog.color.r);
+            ImGui::SliderFloat("Fog Density", &fog.density, 0.0001f, 0.05f, "%.4f");
+        }
+    }
+    ImGui::End();
+}
+
+void SceneEditor::renderGraphicsSettings() {
+    ImGui::SetNextWindowPos(ImVec2(1600 - 410, 560), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(395, 320), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("Graphics, RTX & Post-Process", &m_showGraphicsSettings)) {
+        if (m_pipe) {
+            RenderPipeline::Settings s = m_pipe->settings();
+
+            if (ImGui::CollapsingHeader("Ray Tracing & Reflections (SSR)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Screen-Space Reflections (SSR)", &s.ssr);
+                if (s.ssr) {
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), "SSR Hi-Z Raymarching Active (Roughness-Aware)");
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Ambient Occlusion (GTAO)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Ground-Truth Ambient Occlusion (GTAO)", &s.gtao);
+                if (s.gtao) {
+                    ImGui::SliderFloat("AO Radius (m)", &s.gtaoRadius, 0.1f, 5.0f, "%.2f m");
+                    ImGui::SliderFloat("AO Intensity", &s.gtaoIntensity, 0.1f, 3.0f, "%.2f");
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Volumetric Fog & God Rays (Light Shafts)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Volumetric Atmospheric Fog", &s.volumetricFog);
+                if (s.volumetricFog) {
+                    ImGui::SliderFloat("Fog Density", &s.fogDensity, 0.0001f, 0.05f, "%.5f");
+                    ImGui::SliderFloat("Height Falloff", &s.fogHeightFalloff, 0.01f, 2.0f);
+                    ImGui::SliderFloat("Base Height", &s.fogHeight, -10.0f, 50.0f);
+                }
+                ImGui::Checkbox("Screen-Space Light Shafts (God Rays)", &s.lightShafts);
+                if (s.lightShafts) {
+                    ImGui::SliderFloat("Shafts Density", &s.shaftDensity, 0.1f, 1.0f);
+                    ImGui::SliderFloat("Shafts Weight", &s.shaftWeight, 0.1f, 1.0f);
+                }
+            }
+
+            if (ImGui::CollapsingHeader("HDR Bloom & ACES Tone Mapping", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("HDR Rendering Pipeline", &s.hdr);
+                ImGui::Checkbox("HDR Bloom", &s.bloom);
+                if (s.bloom) {
+                    ImGui::SliderFloat("Bloom Threshold", &s.bloomThreshold, 0.1f, 3.0f);
+                    ImGui::SliderFloat("Bloom Intensity", &s.bloomIntensity, 0.0f, 2.0f);
+                    ImGui::SliderInt("Blur Passes", &s.bloomBlurPasses, 1, 5);
+                }
+                ImGui::SliderFloat("Exposure EV", &s.exposure, 0.1f, 4.0f, "%.3f");
+                ImGui::SliderFloat("Gamma", &s.gamma, 1.0f, 3.0f, "%.2f");
+                ImGui::SliderFloat("Vignette", &s.vignette, 0.0f, 1.0f);
+            }
+
+            if (ImGui::CollapsingHeader("Anti-Aliasing (TAA / FXAA)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("Temporal Anti-Aliasing (TAA)", &s.taa);
+                ImGui::Checkbox("Fast Approximate AA (FXAA)", &s.fxaa);
+            }
+
+            if (ImGui::CollapsingHeader("Atmosphere Sky & Time of Day", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::Button("Sunset")) {
+                    if (auto v = registry().view<Sky>(); v.begin() != v.end()) registry().get<Sky>(*v.begin()) = Sky::Sunset();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Night Sky")) {
+                    if (auto v = registry().view<Sky>(); v.begin() != v.end()) registry().get<Sky>(*v.begin()) = Sky::Night();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Day")) {
+                    if (auto v = registry().view<Sky>(); v.begin() != v.end()) registry().get<Sky>(*v.begin()) = Sky::ClearDay();
+                }
+
+                if (auto v = registry().view<Sky>(); v.begin() != v.end()) {
+                    auto& sky = registry().get<Sky>(*v.begin());
+                    ImGui::ColorEdit3("Zenith (Top)", &sky.top.r);
+                    ImGui::ColorEdit3("Horizon", &sky.horizon.r);
+                    ImGui::ColorEdit3("Ground (Bottom)", &sky.bottom.r);
+                    ImGui::SliderFloat("Sky Exposure", &sky.exposure, 0.1f, 3.0f);
+                }
+
+                if (auto v = registry().view<DirectionalLight>(); v.begin() != v.end()) {
+                    auto& sun = registry().get<DirectionalLight>(*v.begin());
+                    ImGui::DragFloat3("Sun Direction", &sun.direction.x, 0.02f, -1.0f, 1.0f);
+                    if (ImGui::Button("Normalize Sun Dir")) sun.direction = glm::normalize(sun.direction);
+                    ImGui::ColorEdit3("Sun Color", &sun.color.r);
+                    ImGui::SliderFloat("Sun Lux Intensity", &sun.intensity, 0.0f, 30.0f, "%.2f Lux");
+                }
+            }
+
+            m_pipe->setSettings(s);
+        }
+    }
+    ImGui::End();
+}
+
+void SceneEditor::renderClusterLODSettings() {
+    ImGui::SetNextWindowPos(ImVec2(1600 - 410, 240), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(395, 290), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("ClusterLOD / Nanite Virtual Geometry", &m_showClusterLODSettings)) {
+        static bool globalClusterLOD = true;
+        static float errorThresholdPx = 2.0f;
+        static int debugMode = 0;
+
+        ImGui::Checkbox("Enable Virtualized ClusterLOD", &globalClusterLOD);
+        ImGui::SliderFloat("Error Threshold (px)", &errorThresholdPx, 0.5f, 10.0f, "%.1f px");
+
+        const char* debugModes[] = { "0: Normal PBR Shading", "1: Color-Coded LODs (L0=Green, L1=Blue, L2=Yellow, L3=Red)", "2: Cluster Wireframe" };
+        ImGui::Combo("LOD Debug Visualizer", &debugMode, debugModes, IM_ARRAYSIZE(debugModes));
+
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "Nanite Architecture Statistics:");
+        
+        size_t totalMeshes = 0;
+        size_t clusterLODMeshes = 0;
+        for (Entity e : registry().view<MeshRenderer>()) {
+            totalMeshes++;
+            if (registry().get<MeshRenderer>(e).clusterLOD) clusterLODMeshes++;
+        }
+
+        ImGui::BulletText("Total Scene Meshes: %zu", totalMeshes);
+        ImGui::BulletText("ClusterLOD Virtualized: %zu", clusterLODMeshes);
+        ImGui::BulletText("Cluster Bucket Size: 128 Triangles/Cluster");
+        ImGui::BulletText("Hierarchical LOD Levels: 4 discrete DAG levels");
+        ImGui::BulletText("Culling: Sub-mesh Frustum + Screen Error");
+        ImGui::BulletText("Rendering: GPU MultiDraw Instancing");
+    }
+    ImGui::End();
+}
+
+void SceneEditor::buildStandaloneGame() {
+    std::cout << "[SceneEditor] Building standalone game executable...\n";
+    saveSceneToFile("assets/custom_scene.json");
+    
+    int result = std::system("ninja -C build cjoka_standalone");
+    m_buildSuccess = (result == 0);
+    if (m_buildSuccess) {
+        m_buildLog = "Standalone Game Build Succeeded!\n\n"
+                     "Executable created at:\n"
+                     "./build/cjoka_standalone\n\n"
+                     "All assets and scenes are packaged and ready to run standalone.";
+    } else {
+        m_buildLog = "Standalone Game Build Failed.\nCheck console output for compile errors.";
+    }
+    m_showBuildModal = true;
+}
+
+void SceneEditor::renderBuildModal() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f - 240.0f, io.DisplaySize.y * 0.5f - 140.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 260.0f), ImGuiCond_Always);
+
+    if (ImGui::Begin("Standalone Game Build", &m_showBuildModal, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse)) {
+        if (m_buildSuccess) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[SUCCESS] Build Standalone Game Complete!");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "[ERROR] Build Failed");
+        }
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", m_buildLog.c_str());
+        ImGui::Separator();
+
+        if (m_buildSuccess) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.3f, 1.0f));
+            if (ImGui::Button("Run Standalone Game Now", ImVec2(220, 40))) {
+                std::system("./build/cjoka_standalone &");
+                m_showBuildModal = false;
+            }
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+        }
+
+        if (ImGui::Button("Close", ImVec2(120, 40))) {
+            m_showBuildModal = false;
         }
     }
     ImGui::End();
@@ -677,18 +2249,23 @@ void SceneEditor::renderStats() {
     ImGui::SetNextWindowPos(ImVec2(330, 36), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(240, 110), ImGuiCond_FirstUseEver);
 
-    if (ImGui::Begin("Engine Stats", nullptr, ImGuiWindowFlags_NoResize)) {
-        ImGui::Text("FPS: %.1f (%.2f ms)", ImGui::GetIO().Framerate, 1000.0f / std::max(ImGui::GetIO().Framerate, 1.0f));
-        ImGui::Text("Entities: %zu", registry().aliveCount());
-        ImGui::Text("Lights: %zu", registry().count<PointLight>());
-        ImGui::SliderFloat("Fly Speed", &m_camSpeed, 2.0f, 50.0f);
+    if (ImGui::Begin("Engine Stats", &m_showStats, ImGuiWindowFlags_NoResize)) {
+        ImGuiIO& io = ImGui::GetIO();
+        ImGui::Text("FPS: %.1f (%.2f ms)", io.Framerate, 1000.0f / io.Framerate);
+        ImGui::Text("Entities: %zu", registry().storage<Entity>().size());
+        int w, h; window().getFramebufferSize(w, h);
+        ImGui::Text("Resolution: %dx%d", w, h);
+        ImGui::Text("Gizmo: %s (%s)", (m_gizmoOperation == 0 ? "Translate" : (m_gizmoOperation == 1 ? "Rotate" : "Scale")), (m_gizmoMode == 0 ? "Local" : "World"));
     }
     ImGui::End();
 }
 
 void SceneEditor::saveSceneToFile(const std::string& path) {
     std::ofstream file(path);
-    if (!file.is_open()) return;
+    if (!file.is_open()) {
+        std::cerr << "[SceneEditor] Error: Failed to open file for saving: " << path << "\n";
+        return;
+    }
 
     file << "{\n";
 
@@ -734,13 +2311,11 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
         file << "      \"vignette\": " << pp.vignette << "\n";
         file << "    }\n";
     }
-    file << "  },\n";
 
     // 2. Entities
     file << "  \"entities\": [\n";
     bool first = true;
     for (Entity e : registry().view<Transform>()) {
-        if (e == m_camera) continue;
         if (registry().has<Sky>(e) || registry().has<Fog>(e) || registry().has<DirectionalLight>(e) ||
             registry().has<AmbientLight>(e) || registry().has<PostProcessSettings>(e)) continue;
 
@@ -755,6 +2330,17 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
         file << "      \"pos\": [" << tr.position.x << ", " << tr.position.y << ", " << tr.position.z << "],\n";
         file << "      \"rot\": [" << tr.rotation.x << ", " << tr.rotation.y << ", " << tr.rotation.z << "],\n";
         file << "      \"scale\": [" << tr.scale.x << ", " << tr.scale.y << ", " << tr.scale.z << "]";
+
+        if (registry().has<Camera>(e)) {
+            auto& cam = registry().get<Camera>(e);
+            file << ",\n      \"camera\": {\n";
+            file << "        \"fov\": " << cam.fov << ",\n";
+            file << "        \"near\": " << cam.nearPlane << ",\n";
+            file << "        \"far\": " << cam.farPlane << ",\n";
+            file << "        \"primary\": " << (cam.primary ? "true" : "false") << ",\n";
+            file << "        \"perspective\": " << (cam.perspective ? "true" : "false") << "\n";
+            file << "      }";
+        }
 
         if (registry().has<MeshRenderer>(e)) {
             auto& mr = registry().get<MeshRenderer>(e);
@@ -779,38 +2365,55 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
             file << "        \"range\": " << pl.range << "\n";
             file << "      }";
         }
+
+        if (registry().has<CharacterController>(e)) {
+            auto& cc = registry().get<CharacterController>(e);
+            file << ",\n      \"characterController\": {\n";
+            file << "        \"radius\": " << cc.radius << ",\n";
+            file << "        \"height\": " << cc.height << ",\n";
+            file << "        \"speed\": " << cc.speed << ",\n";
+            file << "        \"jumpForce\": " << cc.jumpForce << "\n";
+            file << "      }";
+        }
+
+        if (registry().has<NativeScript>(e)) {
+            auto& ns = registry().get<NativeScript>(e);
+            file << ",\n      \"script\": {\n";
+            file << "        \"name\": \"" << ns.scriptName << "\"\n";
+            file << "      }";
+        }
+
         file << "\n    }";
     }
     file << "\n  ]\n}\n";
-    std::cout << "[SceneEditor] Saved full scene to " << path << "\n";
+    file.close();
+    std::cout << "[SceneEditor] Successfully saved full scene to " << path << "\n";
 }
 
 void SceneEditor::loadSceneFromFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
         std::cout << "[SceneEditor] Could not open " << path << ", loading default showcase\n";
-        loadDefaultShowcase();
+        newScene();
         return;
     }
 
     scene().clear();
     m_selectedEntity = NullEntity;
 
-    auto camRef = scene().create("EditorCamera", Transform{m_camPos, {m_camPitch, m_camYaw, 0.0f}, glm::vec3(1.0f)});
-    camRef.add<Camera>(Camera{m_camFov, 0.1f, 1000.0f, true, true, 10.0f});
-    m_camera = camRef.id();
-
     // Default atmosphere
-    auto skyRef = scene().create("Sky"); skyRef.add<Sky>(Sky::Sunset());
-    auto fogRef = scene().create("Fog"); fogRef.add<Fog>(Fog{{0.2f, 0.22f, 0.28f}, 0.0035f});
-    auto sunRef = scene().create("Sun"); sunRef.add<DirectionalLight>(DirectionalLight{glm::normalize(glm::vec3{-0.4f, -0.8f, -0.3f}), {1.0f, 0.92f, 0.82f}, 2.5f});
-    auto ambRef = scene().create("Ambient"); ambRef.add<AmbientLight>(AmbientLight{{0.12f, 0.14f, 0.18f}, 1.0f});
-    auto ppRef = scene().create("PostProcess"); ppRef.add<PostProcessSettings>(PostProcessSettings::Cinematic());
+    scene().create("Sky").add<Sky>(Sky::Sunset());
+    scene().create("Fog").add<Fog>(Fog{{0.2f, 0.22f, 0.28f}, 0.0035f});
+    scene().create("Sun").add<DirectionalLight>(DirectionalLight{glm::normalize(glm::vec3{-0.4f, -0.8f, -0.3f}), {1.0f, 0.92f, 0.82f}, 2.5f});
+    scene().create("Ambient").add<AmbientLight>(AmbientLight{{0.12f, 0.14f, 0.18f}, 1.0f});
+    scene().create("PostProcess").add<PostProcessSettings>(PostProcessSettings::Cinematic());
 
     std::string line;
     std::string currentName = "";
     glm::vec3 pos{0.0f}, rot{0.0f}, scale{1.0f};
-    bool inMesh = false;
+    bool hasTransform = false;
+
+    bool hasMesh = false;
     std::string assetPath = "";
     std::string texturePath = "";
     glm::vec3 albedo{1.0f};
@@ -820,26 +2423,42 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
     glm::vec3 emissive{0.0f};
     bool clusterLOD = false;
     bool castShadow = true;
-    bool hasMesh = false;
 
-    bool inLight = false;
+    bool hasLight = false;
     glm::vec3 lightCol{1.0f};
     float lightInt = 5.0f;
     float lightRange = 15.0f;
-    bool hasLight = false;
+
+    bool hasCamera = false;
+    float camFovVal = 65.0f;
+    float camNearVal = 0.1f;
+    float camFarVal = 1000.0f;
+    bool camPrimaryVal = true;
+    bool camPerspVal = true;
+
+    bool hasScript = false;
+    std::string scriptName = "";
+
+    bool hasCC = false;
+    float ccRadius = 0.4f;
+    float ccHeight = 1.8f;
+    float ccSpeed = 8.0f;
+    float ccJump = 5.0f;
 
     auto instantiateEntity = [&]() {
-        if (currentName.empty()) return;
+        if (currentName.empty() && !hasTransform) return;
+        std::string entName = currentName.empty() ? "Entity" : currentName;
         Transform tr{pos, rot, scale};
-        if (hasLight) {
-            Material orbMat = Material::Emissive(lightCol, lightInt * 2.0f);
-            auto ref = scene().create(currentName, tr);
-            MeshRenderer mr(Assets::Sphere(0.15f), orbMat);
-            mr.assetPath = "primitive:sphere";
-            mr.setClusterLOD(false);
-            ref.add<MeshRenderer>(mr);
-            ref.add<PointLight>(PointLight{lightCol, lightInt, lightRange});
-        } else if (hasMesh) {
+        auto ref = scene().create(entName, tr);
+        Entity e = ref.id();
+
+        // 1. Camera Component
+        if (hasCamera) {
+            ref.add<Camera>(Camera{camFovVal, camNearVal, camFarVal, camPrimaryVal, camPerspVal, 10.0f});
+        }
+
+        // 2. Mesh Renderer
+        if (hasMesh || !assetPath.empty()) {
             Material mat;
             mat.albedo = albedo;
             mat.metallic = metallic;
@@ -865,30 +2484,48 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             mr.texturePath = texturePath;
             mr.setClusterLOD(clusterLOD);
             mr.setCastShadow(castShadow);
-            scene().create(currentName, tr).add<MeshRenderer>(mr);
-        } else {
-            // Fallback inferred from name
-            if (currentName.find("SportsSedan") != std::string::npos) spawnModel(currentName, "assets/models/cars/sedan-sports.obj", "assets/textures/colormap.png", pos, scale.x);
-            else if (currentName.find("Police") != std::string::npos) spawnModel(currentName, "assets/models/cars/police.obj", "assets/textures/colormap.png", pos, scale.x);
-            else if (currentName.find("Taxi") != std::string::npos) spawnModel(currentName, "assets/models/cars/taxi.obj", "assets/textures/colormap.png", pos, scale.x);
-            else if (currentName.find("SUV") != std::string::npos) spawnModel(currentName, "assets/models/cars/suv.obj", "assets/textures/colormap.png", pos, scale.x);
-            else if (currentName.find("Bench") != std::string::npos) spawnModel(currentName, "assets/models/bench.obj", "", pos, scale.x);
-            else if (currentName.find("Barrel") != std::string::npos) spawnModel(currentName, "assets/models/barrel.obj", "assets/textures/barrel.png", pos, scale.x);
-            else if (currentName.find("Plant") != std::string::npos) spawnModel(currentName, "assets/models/indoor_plant.obj", "assets/textures/indoor_plant_COL.jpg", pos, scale.x);
-            else if (currentName.find("Plane") != std::string::npos || currentName.find("Ground") != std::string::npos) {
-                auto floorTex = Assets::Texture("assets/textures/prototype_floor.png", true);
-                Material floorMat = Material::Textured(floorTex, {0.9f, 0.9f, 0.9f}, 0.1f, 0.8f);
-                scene().create(currentName, tr).add<MeshRenderer>(MeshRenderer(Assets::Cube(1.0f), floorMat).setClusterLOD(false));
-            } else if (currentName.find("Sphere") != std::string::npos) {
-                Material m; m.albedo = {0.8f, 0.8f, 0.85f}; m.metallic = 0.5f; m.roughness = 0.2f;
-                scene().createSphere(tr, m, 0.5f, currentName);
-            } else {
-                Material m; m.albedo = {0.2f, 0.22f, 0.25f}; m.metallic = 0.8f; m.roughness = 0.2f;
-                scene().createCube(tr, m, currentName);
+            ref.add<MeshRenderer>(mr);
+        } else if (hasLight) {
+            // Pure light: add a small visible emissive indicator
+            Material orbMat = Material::Emissive(lightCol, lightInt * 2.0f);
+            MeshRenderer mr(Assets::Sphere(0.15f), orbMat);
+            mr.assetPath = "primitive:sphere";
+            mr.setClusterLOD(false);
+            ref.add<MeshRenderer>(mr);
+        }
+
+        // 3. Point Light
+        if (hasLight) {
+            ref.add<PointLight>(PointLight{lightCol, lightInt, lightRange});
+        }
+
+        // 4. Native Script
+        if (hasScript && !scriptName.empty()) {
+            auto factory = ScriptRegistry::Get().create(scriptName);
+            if (factory) {
+                auto& ns = ref.add<NativeScript>();
+                ns.scriptName = scriptName;
+                ns.instantiate = [scriptName]() { return ScriptRegistry::Get().create(scriptName); };
+                ns.instance = ns.instantiate();
+                if (ns.instance) {
+                    ns.instance->_init(e, &registry());
+                    ns.instance->onCreate();
+                }
             }
         }
+
+        // 5. Character Controller
+        if (hasCC) {
+            auto& cc = ref.add<CharacterController>();
+            cc.radius = ccRadius;
+            cc.height = ccHeight;
+            cc.speed = ccSpeed;
+            cc.jumpForce = ccJump;
+        }
+
+        // Reset state
         currentName = "";
-        hasLight = false;
+        hasTransform = false;
         hasMesh = false;
         assetPath = "";
         texturePath = "";
@@ -897,45 +2534,71 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
         roughness = 0.5f;
         ao = 1.0f;
         emissive = {0.0f, 0.0f, 0.0f};
+        hasLight = false;
+        hasCamera = false;
+        camFovVal = 65.0f;
+        camNearVal = 0.1f;
+        camFarVal = 1000.0f;
+        camPrimaryVal = true;
+        camPerspVal = true;
+        hasScript = false;
+        scriptName = "";
+        hasCC = false;
+        ccRadius = 0.4f;
+        ccHeight = 1.8f;
+        ccSpeed = 8.0f;
+        ccJump = 5.0f;
     };
 
     while (std::getline(file, line)) {
-        if (line.find("\"atmosphere\":") != std::string::npos) {
-            // Atmosphere section
-        } else if (line.find("\"name\":") != std::string::npos) {
+        if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos) {
             instantiateEntity();
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
             currentName = line.substr(start, end - start);
+            hasTransform = true;
         } else if (line.find("\"pos\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^[][%f, %f, %f", &pos.x, &pos.y, &pos.z);
         } else if (line.find("\"rot\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^[][%f, %f, %f", &rot.x, &rot.y, &rot.z);
         } else if (line.find("\"scale\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^[][%f, %f, %f", &scale.x, &scale.y, &scale.z);
+        } else if (line.find("\"camera\":") != std::string::npos) {
+            hasCamera = true;
+        } else if (line.find("\"fov\":") != std::string::npos && hasCamera) {
+            sscanf(line.c_str(), "%*[^:]: %f", &camFovVal);
+        } else if (line.find("\"near\":") != std::string::npos && hasCamera) {
+            sscanf(line.c_str(), "%*[^:]: %f", &camNearVal);
+        } else if (line.find("\"far\":") != std::string::npos && hasCamera) {
+            sscanf(line.c_str(), "%*[^:]: %f", &camFarVal);
+        } else if (line.find("\"primary\":") != std::string::npos && hasCamera) {
+            camPrimaryVal = (line.find("true") != std::string::npos);
+        } else if (line.find("\"perspective\":") != std::string::npos && hasCamera) {
+            camPerspVal = (line.find("true") != std::string::npos);
         } else if (line.find("\"mesh\":") != std::string::npos) {
             hasMesh = true;
-        } else if (line.find("\"assetPath\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"assetPath\":") != std::string::npos) {
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
             assetPath = line.substr(start, end - start);
-        } else if (line.find("\"texturePath\":") != std::string::npos && hasMesh) {
+            hasMesh = true;
+        } else if (line.find("\"texturePath\":") != std::string::npos) {
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
             texturePath = line.substr(start, end - start);
-        } else if (line.find("\"albedo\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"albedo\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^[][%f, %f, %f", &albedo.r, &albedo.g, &albedo.b);
-        } else if (line.find("\"metallic\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"metallic\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^:]: %f", &metallic);
-        } else if (line.find("\"roughness\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"roughness\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^:]: %f", &roughness);
-        } else if (line.find("\"ao\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"ao\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^:]: %f", &ao);
-        } else if (line.find("\"emissive\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"emissive\":") != std::string::npos) {
             sscanf(line.c_str(), "%*[^[][%f, %f, %f", &emissive.r, &emissive.g, &emissive.b);
-        } else if (line.find("\"clusterLOD\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"clusterLOD\":") != std::string::npos) {
             clusterLOD = (line.find("true") != std::string::npos);
-        } else if (line.find("\"castShadow\":") != std::string::npos && hasMesh) {
+        } else if (line.find("\"castShadow\":") != std::string::npos) {
             castShadow = (line.find("true") != std::string::npos);
         } else if (line.find("\"light\":") != std::string::npos) {
             hasLight = true;
@@ -945,13 +2608,43 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             sscanf(line.c_str(), "%*[^:]: %f", &lightInt);
         } else if (line.find("\"range\":") != std::string::npos && hasLight) {
             sscanf(line.c_str(), "%*[^:]: %f", &lightRange);
+        } else if (line.find("\"characterController\":") != std::string::npos) {
+            hasCC = true;
+        } else if (line.find("\"radius\":") != std::string::npos && hasCC) {
+            sscanf(line.c_str(), "%*[^:]: %f", &ccRadius);
+        } else if (line.find("\"height\":") != std::string::npos && hasCC) {
+            sscanf(line.c_str(), "%*[^:]: %f", &ccHeight);
+        } else if (line.find("\"speed\":") != std::string::npos && hasCC) {
+            sscanf(line.c_str(), "%*[^:]: %f", &ccSpeed);
+        } else if (line.find("\"jumpForce\":") != std::string::npos && hasCC) {
+            sscanf(line.c_str(), "%*[^:]: %f", &ccJump);
+        } else if (line.find("\"script\":") != std::string::npos) {
+            hasScript = true;
+        } else if (line.find("\"name\":") != std::string::npos && hasScript) {
+            size_t start = line.find("\"", line.find(":") + 1) + 1;
+            size_t end = line.find("\"", start);
+            scriptName = line.substr(start, end - start);
         }
     }
     instantiateEntity();
+
+    // Ensure at least one game camera exists
+    bool foundCam = false;
+    for (Entity e : registry().view<Camera>()) {
+        (void)e;
+        foundCam = true;
+        break;
+    }
+    if (!foundCam) {
+        auto camRef = scene().create("MainCamera", Transform{{0.0f, 3.5f, -12.0f}, {-10.0f, 0.0f, 0.0f}, glm::vec3(1.0f)});
+        camRef.add<Camera>(Camera{65.0f, 0.1f, 1000.0f, true, true, 10.0f});
+    }
 
     std::cout << "[SceneEditor] Successfully loaded scene from " << path << "\n";
 }
 
 void SceneEditor::onShutdown() {
+    m_phys.reset();
+    cjoka_phys::Global::Shutdown();
     std::cout << "[SceneEditor] Shutdown complete\n";
 }

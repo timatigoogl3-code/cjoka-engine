@@ -51,3 +51,18 @@ bool Window::isMouseButtonPressed(int button) const { return glfwGetMouseButton(
 void Window::getCursorPos(double& x, double& y) const { glfwGetCursorPos(m_window, &x, &y); }
 void Window::setCursorMode(int mode) const { glfwSetInputMode(m_window, GLFW_CURSOR, mode); }
 float Window::getTime() const { return (float)glfwGetTime(); }
+
+static Window::DropCallback s_dropCallback;
+
+void Window::setDropCallback(DropCallback cb) {
+    s_dropCallback = std::move(cb);
+    glfwSetDropCallback(m_window, [](GLFWwindow*, int count, const char** paths) {
+        if (!s_dropCallback || count <= 0) return;
+        std::vector<std::string> fileList;
+        fileList.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            if (paths[i]) fileList.emplace_back(paths[i]);
+        }
+        s_dropCallback(fileList);
+    });
+}

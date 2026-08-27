@@ -146,4 +146,53 @@ void TAA(GLuint currentTex, GLuint depthTex, GLuint historyTex, GLuint outFBO, c
     glActiveTexture(GL_TEXTURE0);
 }
 
+static Shader* s_ssr = nullptr;
+static Shader* s_ssrComp = nullptr;
+
+void SSR(GLuint colorTex, GLuint depthTex, GLuint normalRoughnessTex, GLuint outFBO, const glm::mat4& proj, const glm::mat4& invProj, int width, int height) {
+    if (!s_ssr) s_ssr = new Shader(DefaultShaders::kPostVS, DefaultShaders::kSSRFS);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, outFBO);
+    glViewport(0, 0, width, height);
+    s_ssr->use();
+    s_ssr->setInt("uColorTex", 0);
+    s_ssr->setInt("uDepthTex", 1);
+    s_ssr->setInt("uNormalRoughnessTex", 2);
+    s_ssr->setMat4("uProj", proj);
+    s_ssr->setMat4("uInvProj", invProj);
+    s_ssr->setVec2("uScreenSize", glm::vec2(float(width), float(height)));
+    s_ssr->setFloat("uMaxDistance", 60.0f);
+    s_ssr->setFloat("uThickness", 0.35f);
+    s_ssr->setInt("uMaxSteps", 55);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, colorTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, depthTex);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, normalRoughnessTex);
+
+    DrawFullscreen();
+    glActiveTexture(GL_TEXTURE0);
+}
+
+void SSRComposite(GLuint sceneTex, GLuint ssrTex, GLuint outFBO, float intensity) {
+    if (!s_ssrComp) s_ssrComp = new Shader(DefaultShaders::kPostVS, DefaultShaders::kSSRCompositeFS);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, outFBO);
+    glViewport(0, 0, s_w, s_h);
+    s_ssrComp->use();
+    s_ssrComp->setInt("uSceneColor", 0);
+    s_ssrComp->setInt("uSSRColor", 1);
+    s_ssrComp->setFloat("uSSRIntensity", intensity);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneTex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, ssrTex);
+
+    DrawFullscreen();
+    glActiveTexture(GL_TEXTURE0);
+}
+
 } // namespace PostProcess

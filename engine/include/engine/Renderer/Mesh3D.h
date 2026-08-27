@@ -17,6 +17,7 @@ struct Vertex {
 
 struct InstanceData {
     glm::mat4 model{1.0f};
+    glm::mat4 prevModel{1.0f};    // для motion vectors
     glm::vec4 albedo{1.0f, 1.0f, 1.0f, 0.5f};   // rgb + roughness (PBR)
     glm::vec4 emissive{0.0f, 0.0f, 0.0f, 0.0f}; // rgb + metallic (PBR)
 };

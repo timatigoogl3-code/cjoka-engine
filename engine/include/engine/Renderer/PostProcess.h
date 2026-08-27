@@ -20,6 +20,8 @@ void Blur(GLuint tex, GLuint outFBO, glm::vec2 dir); // dir = (1,0) или (0,1)
 void Composite(GLuint sceneTex, GLuint bloomTex, float bloomIntensity = 0.6f, float vignette = 0.35f,
                float exposure = 1.0f, float gamma = 2.2f, float saturation = 1.06f);
 void FXAA(GLuint tex);
-void TAA(GLuint currentTex, GLuint depthTex, GLuint historyTex, GLuint outFBO, const glm::mat4& invVP, const glm::mat4& prevVP, float feedback = 0.90f);
+void TAA(GLuint currentTex, GLuint depthTex, GLuint historyTex, GLuint outFBO, const glm::mat4& invVP, const glm::mat4& prevVP, float feedback = 0.88f);
+void SSR(GLuint colorTex, GLuint depthTex, GLuint normalRoughnessTex, GLuint outFBO, const glm::mat4& proj, const glm::mat4& invProj, int width, int height);
+void SSRComposite(GLuint sceneTex, GLuint ssrTex, GLuint outFBO, float intensity = 0.85f);
 
 } // namespace PostProcess

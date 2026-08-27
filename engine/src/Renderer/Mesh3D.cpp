@@ -43,14 +43,20 @@ void Mesh3D::setupInstancing() const {
         glVertexAttribPointer(4 + i, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)(i * sizeof(glm::vec4)));
         glVertexAttribDivisor(4 + i, 1);
     }
-    // layout 8 = albedo+shininess
-    glEnableVertexAttribArray(8);
-    glVertexAttribPointer(8, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)sizeof(glm::mat4));
-    glVertexAttribDivisor(8, 1);
-    // layout 9 = emissive
-    glEnableVertexAttribArray(9);
-    glVertexAttribPointer(9, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)(sizeof(glm::mat4) + sizeof(glm::vec4)));
-    glVertexAttribDivisor(9, 1);
+    // layout 8,9,10,11 = mat4 prevModel (для motion vectors)
+    for (int i = 0; i < 4; ++i) {
+        glEnableVertexAttribArray(8 + i);
+        glVertexAttribPointer(8 + i, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)(sizeof(glm::mat4) + i * sizeof(glm::vec4)));
+        glVertexAttribDivisor(8 + i, 1);
+    }
+    // layout 12 = albedo+shininess
+    glEnableVertexAttribArray(12);
+    glVertexAttribPointer(12, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)(2 * sizeof(glm::mat4)));
+    glVertexAttribDivisor(12, 1);
+    // layout 13 = emissive
+    glEnableVertexAttribArray(13);
+    glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, sizeof(InstanceData), (void*)(2 * sizeof(glm::mat4) + sizeof(glm::vec4)));
+    glVertexAttribDivisor(13, 1);
     glBindVertexArray(0);
 }
 void Mesh3D::setup() {

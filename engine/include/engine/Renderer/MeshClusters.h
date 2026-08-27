@@ -44,12 +44,12 @@ public:
     int DrawLODColors(const glm::mat4& mvp, const glm::mat4& model, const glm::vec3& camPos,
                       float fovYrad, float screenH, float errorThresholdPx) const;
 
-    // GPU Instancing (основной высокопроизводительный пайплайн)
-    int DrawInstanced(const glm::mat4* models, int count,
+    // GPU Instancing (основной высокопроизводительный пайплайн) — now uses InstanceData for motion vectors
+    int DrawInstanced(const struct InstanceData* instances, int count,
                       const glm::vec3& camPos, const glm::mat4& viewProj,
                       float fovYrad, float screenH, float thresholdPx) const;
 
-    // Shadow map pass
+    // Shadow map pass (still just model matrices)
     int DrawInstancedShadow(const glm::mat4* models, int count,
                             const glm::vec3& lightEye, const glm::mat4& lightVP,
                             float thresholdPx) const;
@@ -91,8 +91,16 @@ private:
 
     void EnsureInstanceVBO(int needed) const;
     void BindInstanceAttribs() const;
-    int SelectAndFill(const glm::mat4& mvp, const glm::mat4& model, const glm::vec3& camPos,
-                      float fovYrad, float screenH, float thresholdPx) const;
+
+    struct LODSelection {
+        std::vector<GLsizei> counts[8];
+        std::vector<const void*> offs[8];
+        int drawn = 0;
+    };
+
+    LODSelection SelectLODs(const glm::mat4& mvp, const glm::mat4& model, const glm::vec3& camPos,
+                            float fovYrad, float screenH, float thresholdPx) const;
+    void DrawSelection(const LODSelection& sel) const;
 };
 
 // Конфигурация кластерного LOD
@@ -100,6 +108,7 @@ namespace cluster_lod {
 inline bool  enabled = false;
 inline float thresholdPx = 2.5f;
 inline int   shadowEveryNFrames = 1;
+inline bool  useQuadric = false;   // true = QEM simplification, false = vertex clustering
 }
 namespace clusterLOD = cluster_lod;
 namespace nanite = cluster_lod;

@@ -14,19 +14,25 @@
 ## Этап 3: Тени и Сглаживание (Shadows & TAA) — **[ВЫПОЛНЕНО]**
 - [x] **Cascaded Shadow Maps (CSM)**: 3 каскада в `GL_TEXTURE_2D_ARRAY`.
 - [x] **PCSS / 16-tap Poisson Filtering**: Мягкие тени с адаптивным радиусом и Texel Snapping.
-- [x] **Temporal Anti-Aliasing (TAA)**: YCoCg AABB-Clamping с репроекцией истории по буферу глубины.
-- [x] **Full Scene Serialization**: Сохранение и загрузка полного графа компонентов (PBR материалы, свет, атмосфера).
+- [x] **Temporal Anti-Aliasing (TAA)**: YCoCg AABB-Clamping с velocity buffer reprojection.
+- [x] **Full Scene Serialization**: Сохранение и загрузка полного графа компонентов.
 
-## Этап 4: Отражения и Непрямой Свет (SSR, Velocity, LPV / Lightmaps & VXGI) — **[В РАБОТЕ]**
-1. **Motion Vectors / Velocity Buffer (RG16F)**:
-   - [ ] Запись скоростей пикселей для движущихся объектов (`prevModel` vs `currModel`) для устранения гоустинга и смазывания в TAA.
-2. **Screen-Space Reflections (SSR)**:
-   - [ ] Реймарчинг по Depth/HDR буферу в экранном пространстве.
-   - [ ] Зеркальные и глянцевые отражения соседних объектов, машин и света на полированном полу и мокрых поверхностях.
-   - [ ] Плавный переход от SSR к Sky IBL на краях экрана и при промахах лучей.
-3. **Light Propagation Volumes (LPV) / Static Lightmaps**:
-   - [ ] Быстрый расчет вторичных отскоков света (Indirect Diffuse Bounce) для статической геометрии и помещений.
-4. **Voxel Cone Tracing (VXGI)**:
-   - [ ] Вокселизация сцены в 3D текстуру (Clipmap вокруг камеры).
-   - [ ] Анизотропный мипмаппинг вокселей.
-   - [ ] Трассировка конусов для динамического глобального освещения и затенения.
+## Этап 4: Отражения и Непрямой Свет — **[ВЫПОЛНЕНО]**
+- [x] **Motion Vectors / Velocity Buffer (RG16F)**: MRT, prevMatrix, InstanceData, ClusteredMesh.
+- [x] **Reverse-Z Depth Buffer**: far=0.0, near=1.0, precision near infinity.
+- [x] **Normal Map + Specular Map**: TBN matrix, reading в kLitFS/kLitInstancedFS.
+- [x] **TAA на velocity buffer**: Per-pixel motion vectors вместо depth reprojection.
+- [x] **Z-Prepass**: depth-only reverse-Z pass в Systems::Render, инстансированный шейдер.
+- [x] **GT Ambient Occlusion (GTAO)**: Half-res, edge-aware bilateral blur, height-reconstruct normals.
+- [x] **Volumetric Fog**: Screen-space ray march, quarter-res, height falloff + FBM noise.
+- [x] **Light Shafts (God Rays)**: Screen-space radial blur, additive blend.
+
+## Этап 5: Продвинутые эффекты — **[В РАБОТЕ]**
+1. **Subsurface Scattering (SSS)** — dual scattering для кожи.
+2. **Anisotropic Hair** — Kajiya-Kay модель.
+3. **Tessellation + Displacement Maps** — динамическая геометрия.
+4. **Physical Water Model** — Gerstner waves + refraction + foam.
+
+## Этап 6: VXGI — **[ЗАПЛАНИРОВАНО]**
+1. **Voxel Cone Tracing (VXGI)** — Clipmap + aniso mipmaps + cone tracing для GI.
+2. **Light Propagation Volumes (LPV)** — вторичные отскоки.

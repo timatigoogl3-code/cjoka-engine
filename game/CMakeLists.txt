@@ -21,10 +21,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     )
 endif()
 
-# LSAN ложно ругается на libglfw/libdecor (423KB в 10k аллокациях) — не наш код.
-# Запуск: LSAN_OPTIONS=suppressions=engine/sanitizer/lsan.supp ./build/cjoka
-# или ASAN_OPTIONS=detect_leaks=0 ./build/cjoka (быстрый костыль)
-# sjoka.sh play game уже выставляет LSAN_OPTIONS автоматически.
+# Standalone Executable target for distribution / game exports
+add_executable(cjoka_standalone
+    src/StandaloneMain.cpp
+)
+target_include_directories(cjoka_standalone PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(cjoka_standalone PRIVATE cjoka_engine)
+set_target_properties(cjoka_standalone PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-# Для удобства: бинарник в build/game/ но также доступен как build/cjoka через симлинк
-set_target_properties(cjoka PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(cjoka_standalone PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+    )
+endif()
+

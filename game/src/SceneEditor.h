@@ -2,9 +2,11 @@
 #include "engine/Engine.h"
 #include "engine/Renderer/RenderPipeline.h"
 #include "engine/Renderer/Shader.h"
+#include "GameScripts.h"
 #include <memory>
 #include <vector>
 #include <string>
+#include <filesystem>
 
 class SceneEditor : public Application {
 public:
@@ -19,21 +21,34 @@ protected:
 
 private:
     void updateCamera(float dt);
+    void updateScripts(float dt);
     void pickObjectUnderMouse();
+    void onFilesDropped(const std::vector<std::string>& paths);
     void renderUI();
     void renderGizmo();
     void renderMenuBar();
     void renderHierarchy();
     void renderInspector();
-    void renderSpawner();
+    void renderAssetBrowser();
     void renderAtmosphereEditor();
     void renderStats();
+    void renderCameraPreview();
+    void renderGraphicsSettings();
+    void renderClusterLODSettings();
+    void renderSceneCameraGizmos();
+    void renderPlayModeOverlay();
+    void buildStandaloneGame();
+    void renderBuildModal();
 
     // Scene management
     void newScene();
     void loadDefaultShowcase();
     void saveSceneToFile(const std::string& path);
     void loadSceneFromFile(const std::string& path);
+    void refreshAvailableScenes();
+    Entity duplicateEntity(Entity e);
+    Entity assembleModularVehicle(const glm::vec3& pos);
+    void createNewScriptFile(const std::string& scriptName);
     
     // Spawning helpers
     Entity spawnPrimitive(const std::string& type, const glm::vec3& pos);
@@ -43,7 +58,6 @@ private:
     // Core renderer
     std::unique_ptr<Shader> m_litShader;
     std::unique_ptr<RenderPipeline> m_pipe;
-    Entity m_camera = NullEntity;
 
     // Fly camera state
     glm::vec3 m_camPos{0.0f, 5.0f, -15.0f};
@@ -52,6 +66,7 @@ private:
     float m_camSpeed = 12.0f;
     float m_camFov = 65.0f;
     bool m_flycamActive = false;
+    bool m_invertY = false;
 
     // Selection & Editing
     Entity m_selectedEntity = NullEntity;
@@ -60,8 +75,28 @@ private:
     bool m_useSnap = false;
     float m_snapValue[3] = {0.5f, 0.5f, 0.5f};
     bool m_showUI = true;
+    bool m_isPlaying = false; // Simulation / Play Mode
+
+    // Window Visibility Flags (controlled via Windows menu)
+    bool m_showHierarchy = false;
+    bool m_showInspector = false;
+    bool m_showAssetBrowser = false;
+    bool m_showAtmosphereEditor = false;
+    bool m_showGraphicsSettings = false;
+    bool m_showClusterLODSettings = false;
+    bool m_showStats = false;
+    bool m_showCameraPreview = true;
+
+    // Asset Browser filesystem state
+    std::filesystem::path m_currentDirectory = "assets";
+    std::vector<std::string> m_availableScenes;
 
     // Search filter in hierarchy
     char m_searchBuf[128] = "";
     char m_sceneFileBuf[128] = "assets/custom_scene.json";
+    bool m_showBuildModal = false;
+    std::string m_buildLog = "";
+    bool m_buildSuccess = false;
+
+    std::unique_ptr<class cjoka_phys::World> m_phys;
 };

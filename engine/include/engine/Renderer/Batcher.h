@@ -14,7 +14,7 @@ class Batcher {
 public:
     void begin();
     void submit(const Transform& tr, const MeshRenderer& mr);
-    void flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow = nullptr);
+    void flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow = nullptr, const glm::mat4& prevViewProj = glm::mat4(1.0f));
 
     size_t batchCount() const { return m_batches.size(); }
     size_t totalInstances() const;
