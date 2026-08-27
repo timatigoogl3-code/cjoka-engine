@@ -3825,15 +3825,7 @@ void SceneEditor::renderMaterialPalette() {
                 ImGui::EndDragDropSource();
             }
 
-            ImGui::TextWrapped("%s", stem.c_str());
-            ImGui::TextDisabled("R:%.2f M:%.2f", tempMat.roughness, tempMat.metallic);
-            if (tempMat.useNormalMap) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "[NRM]");
-            }
-            ImGui::EndGroup();
-
-            // Right-click context menu on material card
+            // Right-click context menu on material button
             if (ImGui::BeginPopupContextItem()) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Material: %s", stem.c_str());
                 ImGui::Separator();
@@ -3855,6 +3847,14 @@ void SceneEditor::renderMaterialPalette() {
                 ImGui::PopStyleColor();
                 ImGui::EndPopup();
             }
+
+            ImGui::TextWrapped("%s", stem.c_str());
+            ImGui::TextDisabled("R:%.2f M:%.2f", tempMat.roughness, tempMat.metallic);
+            if (tempMat.useNormalMap) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "[NRM]");
+            }
+            ImGui::EndGroup();
 
             float lastButtonX2 = ImGui::GetItemRectMax().x;
             float nextButtonX2 = lastButtonX2 + ImGui::GetStyle().ItemSpacing.x + cardWidth;
