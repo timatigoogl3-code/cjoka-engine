@@ -122,6 +122,8 @@ private:
     // Material Editor selected material
     std::string m_selectedMaterialFile = "";
     Material m_editingMaterial;
+    std::unordered_map<std::string, Material> m_materialCache;
+    std::vector<std::string> m_cachedMaterialPaletteFiles;
 
     // Search filter in hierarchy
     char m_searchBuf[128] = "";

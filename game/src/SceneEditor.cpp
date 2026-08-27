@@ -3670,6 +3670,13 @@ void SceneEditor::applyLayoutPreset(int presetId) {
 }
 
 void SceneEditor::loadMaterialFromFile(const std::string& path, Material& outMat) {
+    if (path.empty()) return;
+    auto it = m_materialCache.find(path);
+    if (it != m_materialCache.end()) {
+        outMat = it->second;
+        return;
+    }
+
     std::ifstream file(path);
     if (!file.is_open()) return;
     outMat.materialPath = path;
@@ -3717,6 +3724,7 @@ void SceneEditor::loadMaterialFromFile(const std::string& path, Material& outMat
             }
         }
     }
+    m_materialCache[path] = outMat;
 }
 
 void SceneEditor::saveMaterialToFile(const std::string& path, const Material& mat) {
@@ -3734,6 +3742,7 @@ void SceneEditor::saveMaterialToFile(const std::string& path, const Material& ma
     file << "  \"specularMap\": \"" << mat.specularMapPath << "\"\n";
     file << "}\n";
     file.close();
+    m_materialCache[path] = mat;
 }
 
 void SceneEditor::applyMaterialToEntity(Entity e, const std::string& matPath) {
@@ -3749,6 +3758,7 @@ void SceneEditor::createNewMaterialFile(const std::string& matName, const Materi
     m_selectedAssetPath = path;
     m_selectedMaterialFile = path;
     m_editingMaterial = templateMat;
+    m_cachedMaterialPaletteFiles.clear(); // force refresh
 }
 
 void SceneEditor::createNewFolder(const std::string& folderName) {
@@ -3779,23 +3789,28 @@ void SceneEditor::renderMaterialPalette() {
 
         ImGui::Separator();
 
-        // Scan materials folder
-        std::vector<std::string> matFiles;
-        if (std::filesystem::exists("assets/materials")) {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator("assets/materials")) {
-                if (entry.is_regular_file() && (entry.path().extension() == ".json" || entry.path().string().find(".mat") != std::string::npos)) {
-                    matFiles.push_back(entry.path().string());
+        // Scan materials folder periodically (once every 1.5s or on startup)
+        static float scanTimer = 0.0f;
+        scanTimer += ImGui::GetIO().DeltaTime;
+        if (m_cachedMaterialPaletteFiles.empty() || scanTimer > 1.5f) {
+            scanTimer = 0.0f;
+            m_cachedMaterialPaletteFiles.clear();
+            if (std::filesystem::exists("assets/materials")) {
+                for (const auto& entry : std::filesystem::recursive_directory_iterator("assets/materials")) {
+                    if (entry.is_regular_file() && (entry.path().extension() == ".json" || entry.path().string().find(".mat") != std::string::npos)) {
+                        m_cachedMaterialPaletteFiles.push_back(entry.path().string());
+                    }
                 }
             }
+            std::sort(m_cachedMaterialPaletteFiles.begin(), m_cachedMaterialPaletteFiles.end());
         }
-        std::sort(matFiles.begin(), matFiles.end());
 
         ImGui::BeginChild("MaterialGrid", ImVec2(0, 160), true);
         float cardWidth = 115.0f;
         float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
 
-        for (size_t i = 0; i < matFiles.size(); ++i) {
-            const auto& p = matFiles[i];
+        for (size_t i = 0; i < m_cachedMaterialPaletteFiles.size(); ++i) {
+            const auto& p = m_cachedMaterialPaletteFiles[i];
             std::string stem = std::filesystem::path(p).stem().string();
             if (stem.find(".mat") != std::string::npos) stem = std::filesystem::path(stem).stem().string();
 
@@ -3858,7 +3873,7 @@ void SceneEditor::renderMaterialPalette() {
 
             float lastButtonX2 = ImGui::GetItemRectMax().x;
             float nextButtonX2 = lastButtonX2 + ImGui::GetStyle().ItemSpacing.x + cardWidth;
-            if (i + 1 < matFiles.size() && nextButtonX2 < windowVisibleX2) {
+            if (i + 1 < m_cachedMaterialPaletteFiles.size() && nextButtonX2 < windowVisibleX2) {
                 ImGui::SameLine();
             }
             ImGui::PopID();
