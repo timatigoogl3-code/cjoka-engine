@@ -36,3 +36,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     )
 endif()
 
+add_custom_command(TARGET cjoka_standalone POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_SOURCE_DIR}/assets ${CMAKE_BINARY_DIR}/assets
+)
+

@@ -10,6 +10,7 @@
 #include "GameScripts.h"
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <GLFW/glfw3.h>
 
 class StandaloneGame : public Application {
@@ -34,13 +35,22 @@ public:
         window().getFramebufferSize(w, h);
         m_pipe = std::make_unique<RenderPipeline>(w, h);
 
-        loadScene("assets/custom_scene.json");
+        std::string scenePath = "assets/custom_scene.json";
+        if (!std::filesystem::exists(scenePath) && std::filesystem::exists("../assets/custom_scene.json")) {
+            scenePath = "../assets/custom_scene.json";
+        }
+        loadScene(scenePath);
         Input::SetCursorLocked(true);
         m_cursorLocked = true;
     }
 
     void loadScene(const std::string& path) {
-        std::ifstream file(path);
+        std::string actualPath = path;
+        if (!std::filesystem::exists(actualPath) && std::filesystem::exists("../" + path)) {
+            actualPath = "../" + path;
+        }
+
+        std::ifstream file(actualPath);
         if (!file.is_open()) {
             std::cout << "[Standalone] Warning: Could not open " << path << ", creating default camera\n";
             auto cam = scene().create("MainCamera", Transform{{0.0f, 2.0f, -8.0f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}});
@@ -82,6 +92,15 @@ public:
         std::string scriptName = "";
         bool hasCC = false;
         float ccRadius = 0.4f, ccHeight = 1.8f, ccSpeed = 8.0f, ccJump = 5.0f;
+
+        bool hasCol = false;
+        int colType = 0;
+        glm::vec3 colHalfExtents{0.5f};
+        float colRadius = 0.5f;
+        float colHeight = 1.0f;
+        glm::vec3 colOffset{0.0f};
+        std::string parentName = "";
+        std::vector<std::pair<Entity, std::string>> pendingParents;
 
         auto instantiateEntity = [&]() {
             if (currentName.empty() && !hasTransform) return;
@@ -156,6 +175,19 @@ public:
                 cc.jumpForce = ccJump;
             }
 
+            if (hasCol) {
+                auto& col = ref.add<cjoka_phys::Collider>();
+                col.type = (cjoka_phys::ColliderType)colType;
+                col.halfExtents = colHalfExtents;
+                col.radius = colRadius;
+                col.height = colHeight;
+                col.centerOffset = colOffset;
+            }
+
+            if (!parentName.empty()) {
+                pendingParents.push_back({e, parentName});
+            }
+
             currentName = "";
             hasTransform = false;
             hasMesh = false;
@@ -180,9 +212,67 @@ public:
             ccHeight = 1.8f;
             ccSpeed = 8.0f;
             ccJump = 5.0f;
+            hasCol = false;
+            colType = 0;
+            colHalfExtents = glm::vec3(0.5f);
+            colRadius = 0.5f;
+            colHeight = 1.0f;
+            colOffset = glm::vec3(0.0f);
+            parentName = "";
         };
 
+        bool inSky = false, inFog = false, inSun = false, inAmbient = false, inPost = false;
+
         while (std::getline(file, line)) {
+            if (line.find("\"sky\":") != std::string::npos) { inSky = true; inFog = inSun = inAmbient = inPost = false; continue; }
+            if (line.find("\"fog\":") != std::string::npos) { inFog = true; inSky = inSun = inAmbient = inPost = false; continue; }
+            if (line.find("\"sun\":") != std::string::npos) { inSun = true; inSky = inFog = inAmbient = inPost = false; continue; }
+            if (line.find("\"ambient\":") != std::string::npos) { inAmbient = true; inSky = inFog = inSun = inPost = false; continue; }
+            if (line.find("\"post\":") != std::string::npos) { inPost = true; inSky = inFog = inSun = inAmbient = false; continue; }
+            if (line.find("\"entities\":") != std::string::npos) { inSky = inFog = inSun = inAmbient = inPost = false; continue; }
+
+            if (inSky) {
+                if (auto v = registry().view<Sky>(); v.begin() != v.end()) {
+                    auto& sky = registry().get<Sky>(*v.begin());
+                    if (line.find("\"top\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sky.top.r, &sky.top.g, &sky.top.b);
+                    else if (line.find("\"horizon\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sky.horizon.r, &sky.horizon.g, &sky.horizon.b);
+                    else if (line.find("\"bottom\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sky.bottom.r, &sky.bottom.g, &sky.bottom.b);
+                    else if (line.find("\"exposure\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &sky.exposure);
+                }
+                continue;
+            } else if (inFog) {
+                if (auto v = registry().view<Fog>(); v.begin() != v.end()) {
+                    auto& fog = registry().get<Fog>(*v.begin());
+                    if (line.find("\"color\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &fog.color.r, &fog.color.g, &fog.color.b);
+                    else if (line.find("\"density\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &fog.density);
+                }
+                continue;
+            } else if (inSun) {
+                if (auto v = registry().view<DirectionalLight>(); v.begin() != v.end()) {
+                    auto& sun = registry().get<DirectionalLight>(*v.begin());
+                    if (line.find("\"dir\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sun.direction.x, &sun.direction.y, &sun.direction.z);
+                    else if (line.find("\"color\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sun.color.r, &sun.color.g, &sun.color.b);
+                    else if (line.find("\"intensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &sun.intensity);
+                }
+                continue;
+            } else if (inAmbient) {
+                if (auto v = registry().view<AmbientLight>(); v.begin() != v.end()) {
+                    auto& amb = registry().get<AmbientLight>(*v.begin());
+                    if (line.find("\"color\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &amb.color.r, &amb.color.g, &amb.color.b);
+                    else if (line.find("\"intensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &amb.intensity);
+                }
+                continue;
+            } else if (inPost) {
+                if (auto v = registry().view<PostProcessSettings>(); v.begin() != v.end()) {
+                    auto& pp = registry().get<PostProcessSettings>(*v.begin());
+                    if (line.find("\"bloomThreshold\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomThreshold);
+                    else if (line.find("\"bloomIntensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomIntensity);
+                    else if (line.find("\"exposure\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.exposure);
+                    else if (line.find("\"vignette\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.vignette);
+                }
+                continue;
+            }
+
             if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos) {
                 instantiateEntity();
                 size_t start = line.find("\"", line.find(":") + 1) + 1;
@@ -250,6 +340,22 @@ public:
                 sscanf(line.c_str(), "%*[^:]: %f", &ccSpeed);
             } else if (line.find("\"jumpForce\":") != std::string::npos && hasCC) {
                 sscanf(line.c_str(), "%*[^:]: %f", &ccJump);
+            } else if (line.find("\"collider\":") != std::string::npos) {
+                hasCol = true;
+            } else if (line.find("\"type\":") != std::string::npos && hasCol) {
+                sscanf(line.c_str(), "%*[^:]: %d", &colType);
+            } else if (line.find("\"halfExtents\":") != std::string::npos && hasCol) {
+                sscanf(line.c_str(), "%*[^[][%f, %f, %f", &colHalfExtents.x, &colHalfExtents.y, &colHalfExtents.z);
+            } else if (line.find("\"radius\":") != std::string::npos && hasCol) {
+                sscanf(line.c_str(), "%*[^:]: %f", &colRadius);
+            } else if (line.find("\"height\":") != std::string::npos && hasCol) {
+                sscanf(line.c_str(), "%*[^:]: %f", &colHeight);
+            } else if (line.find("\"offset\":") != std::string::npos && hasCol) {
+                sscanf(line.c_str(), "%*[^[][%f, %f, %f", &colOffset.x, &colOffset.y, &colOffset.z);
+            } else if (line.find("\"parent\":") != std::string::npos) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                parentName = line.substr(start, end - start);
             } else if (line.find("\"script\":") != std::string::npos) {
                 hasScript = true;
             } else if (line.find("\"name\":") != std::string::npos && hasScript) {
@@ -259,6 +365,22 @@ public:
             }
         }
         instantiateEntity();
+
+        // Resolve parent-child hierarchy
+        for (auto& [child, pName] : pendingParents) {
+            for (Entity p : registry().view<Name>()) {
+                if (registry().get<Name>(p).value == pName && p != child) {
+                    auto& h = registry().has<Hierarchy>(child) ? registry().get<Hierarchy>(child) : registry().emplace<Hierarchy>(child);
+                    h.parent = p;
+                    break;
+                }
+            }
+        }
+
+        // Build PhysX static and dynamic actors
+        if (m_phys) {
+            m_phys->BuildActors(registry());
+        }
 
         bool foundCam = false;
         for (Entity e : registry().view<Camera>()) {
@@ -272,7 +394,7 @@ public:
             camRef.add<CharacterController>();
         }
 
-        std::cout << "[Standalone] Successfully loaded scene: " << path << "\n";
+        std::cout << "[Standalone] Successfully loaded scene: " << actualPath << "\n";
     }
 
     void onUpdate(float dt) override {

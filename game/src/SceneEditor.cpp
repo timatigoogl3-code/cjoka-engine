@@ -2695,15 +2695,32 @@ void SceneEditor::renderClusterLODSettings() {
 
 void SceneEditor::buildStandaloneGame() {
     std::cout << "[SceneEditor] Building standalone game executable...\n";
+    if (m_isPlaying) {
+        m_isPlaying = false;
+        loadSceneFromFile("assets/.play_mode_backup.json");
+        window().setCursorMode(GLFW_CURSOR_NORMAL);
+    }
+
     saveSceneToFile("assets/custom_scene.json");
-    
+    if (std::string(m_sceneFileBuf) != "assets/custom_scene.json") {
+        saveSceneToFile(m_sceneFileBuf);
+    }
+
+    // Ensure assets symlink exists in build/ so launching from build/ directory works
+    std::system("mkdir -p build && ln -sfn ../assets build/assets");
+
+    // Force touch StandaloneMain.cpp to ensure ninja ALWAYS rebuilds if needed
+    std::system("touch game/src/StandaloneMain.cpp");
+
     int result = std::system("ninja -C build cjoka_standalone");
     m_buildSuccess = (result == 0);
     if (m_buildSuccess) {
         m_buildLog = "Standalone Game Build Succeeded!\n\n"
-                     "Executable created at:\n"
+                     "Saved current scene to:\n"
+                     "assets/custom_scene.json\n\n"
+                     "Executable ready at:\n"
                      "./build/cjoka_standalone\n\n"
-                     "All assets and scenes are packaged and ready to run standalone.";
+                     "All changes, colliders, hierarchy, scripts and lighting are updated in the build.";
     } else {
         m_buildLog = "Standalone Game Build Failed.\nCheck console output for compile errors.";
     }
@@ -2861,6 +2878,7 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
         file << "      \"vignette\": " << pp.vignette << "\n";
         file << "    }\n";
     }
+    file << "  },\n";
 
     // 2. Entities
     file << "  \"entities\": [\n";
@@ -3149,7 +3167,58 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
         parentName = "";
     };
 
+    bool inSky = false, inFog = false, inSun = false, inAmbient = false, inPost = false;
+
     while (std::getline(file, line)) {
+        if (line.find("\"sky\":") != std::string::npos) { inSky = true; inFog = inSun = inAmbient = inPost = false; continue; }
+        if (line.find("\"fog\":") != std::string::npos) { inFog = true; inSky = inSun = inAmbient = inPost = false; continue; }
+        if (line.find("\"sun\":") != std::string::npos) { inSun = true; inSky = inFog = inAmbient = inPost = false; continue; }
+        if (line.find("\"ambient\":") != std::string::npos) { inAmbient = true; inSky = inFog = inSun = inPost = false; continue; }
+        if (line.find("\"post\":") != std::string::npos) { inPost = true; inSky = inFog = inSun = inAmbient = false; continue; }
+        if (line.find("\"entities\":") != std::string::npos) { inSky = inFog = inSun = inAmbient = inPost = false; continue; }
+
+        if (inSky) {
+            if (auto v = registry().view<Sky>(); v.begin() != v.end()) {
+                auto& sky = registry().get<Sky>(*v.begin());
+                if (line.find("\"top\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sky.top.r, &sky.top.g, &sky.top.b);
+                else if (line.find("\"horizon\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sky.horizon.r, &sky.horizon.g, &sky.horizon.b);
+                else if (line.find("\"bottom\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sky.bottom.r, &sky.bottom.g, &sky.bottom.b);
+                else if (line.find("\"exposure\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &sky.exposure);
+            }
+            continue;
+        } else if (inFog) {
+            if (auto v = registry().view<Fog>(); v.begin() != v.end()) {
+                auto& fog = registry().get<Fog>(*v.begin());
+                if (line.find("\"color\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &fog.color.r, &fog.color.g, &fog.color.b);
+                else if (line.find("\"density\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &fog.density);
+            }
+            continue;
+        } else if (inSun) {
+            if (auto v = registry().view<DirectionalLight>(); v.begin() != v.end()) {
+                auto& sun = registry().get<DirectionalLight>(*v.begin());
+                if (line.find("\"dir\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sun.direction.x, &sun.direction.y, &sun.direction.z);
+                else if (line.find("\"color\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &sun.color.r, &sun.color.g, &sun.color.b);
+                else if (line.find("\"intensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &sun.intensity);
+            }
+            continue;
+        } else if (inAmbient) {
+            if (auto v = registry().view<AmbientLight>(); v.begin() != v.end()) {
+                auto& amb = registry().get<AmbientLight>(*v.begin());
+                if (line.find("\"color\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &amb.color.r, &amb.color.g, &amb.color.b);
+                else if (line.find("\"intensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &amb.intensity);
+            }
+            continue;
+        } else if (inPost) {
+            if (auto v = registry().view<PostProcessSettings>(); v.begin() != v.end()) {
+                auto& pp = registry().get<PostProcessSettings>(*v.begin());
+                if (line.find("\"bloomThreshold\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomThreshold);
+                else if (line.find("\"bloomIntensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomIntensity);
+                else if (line.find("\"exposure\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.exposure);
+                else if (line.find("\"vignette\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.vignette);
+            }
+            continue;
+        }
+
         if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos) {
             instantiateEntity();
             size_t start = line.find("\"", line.find(":") + 1) + 1;
