@@ -42,6 +42,7 @@ private:
     void propagateTransformDeltaToChildren(Entity parent, const glm::vec3& deltaPos, const glm::vec3& deltaRot);
     void buildStandaloneGame();
     void renderBuildModal();
+    void renderDeleteAssetModal();
 
     // Scene management
     void newScene();
@@ -93,6 +94,9 @@ private:
 
     // Asset Browser filesystem state
     std::filesystem::path m_currentDirectory = "assets";
+    std::filesystem::path m_selectedAssetPath = "";
+    std::filesystem::path m_assetToDelete = "";
+    bool m_showDeleteAssetModal = false;
     std::vector<std::string> m_availableScenes;
 
     // Search filter in hierarchy

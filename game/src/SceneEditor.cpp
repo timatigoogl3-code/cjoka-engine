@@ -752,6 +752,7 @@ void SceneEditor::onImGuiRender() {
     if (m_showStats) renderStats();
     if (m_showCameraPreview) renderCameraPreview();
     if (m_showBuildModal) renderBuildModal();
+    if (m_showDeleteAssetModal) renderDeleteAssetModal();
 }
 
 void SceneEditor::renderMenuBar() {
@@ -2091,37 +2092,95 @@ void SceneEditor::renderAssetBrowser() {
                 if (m_currentDirectory != "assets") {
                     if (ImGui::Button("[ < Back ]")) {
                         m_currentDirectory = m_currentDirectory.parent_path();
+                        m_selectedAssetPath.clear();
                     }
                     ImGui::SameLine();
                 }
                 ImGui::Text("Directory: %s", m_currentDirectory.string().c_str());
                 ImGui::PopStyleColor();
+
+                if (!m_selectedAssetPath.empty() && std::filesystem::exists(m_selectedAssetPath)) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), "| Selected: %s", m_selectedAssetPath.filename().string().c_str());
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                    if (ImGui::Button("Delete Asset (Del)")) {
+                        m_assetToDelete = m_selectedAssetPath;
+                        m_showDeleteAssetModal = true;
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Deselect")) {
+                        m_selectedAssetPath.clear();
+                    }
+                }
+
+                // Delete key shortcut when an asset is selected
+                if (!m_selectedAssetPath.empty() && Input::IsKeyJustPressed(GLFW_KEY_DELETE)) {
+                    m_assetToDelete = m_selectedAssetPath;
+                    m_showDeleteAssetModal = true;
+                }
+
                 ImGui::Separator();
 
                 // Folder & File Cards
                 ImGui::BeginChild("FilesView", ImVec2(0, 0), true);
                 if (std::filesystem::exists(m_currentDirectory)) {
+                    std::vector<std::filesystem::directory_entry> entries;
                     for (const auto& entry : std::filesystem::directory_iterator(m_currentDirectory)) {
+                        std::string fn = entry.path().filename().string();
+                        if (!fn.empty() && fn[0] != '.') entries.push_back(entry);
+                    }
+                    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+                        if (a.is_directory() != b.is_directory()) return a.is_directory();
+                        return a.path().filename().string() < b.path().filename().string();
+                    });
+
+                    for (const auto& entry : entries) {
                         const auto& p = entry.path();
                         std::string filename = p.filename().string();
-                        if (filename.empty() || filename[0] == '.') continue;
+                        bool isSel = (m_selectedAssetPath == p);
 
                         if (entry.is_directory()) {
-                            std::string label = "[Folder] " + filename;
-                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.3f, 0.4f, 0.9f));
-                            if (ImGui::Button(label.c_str(), ImVec2(130, 45))) {
+                            std::string label = "[Folder]\n" + filename;
+                            ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.35f, 0.55f, 0.85f, 1.0f) : ImVec4(0.2f, 0.3f, 0.4f, 0.9f));
+                            if (ImGui::Button((label + "##dir_" + filename).c_str(), ImVec2(135, 48))) {
+                                m_selectedAssetPath = p;
+                            }
+                            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                                 m_currentDirectory /= p.filename();
+                                m_selectedAssetPath.clear();
                             }
                             ImGui::PopStyleColor();
+
+                            // Right-click context menu
+                            if (ImGui::BeginPopupContextItem()) {
+                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Folder: %s", filename.c_str());
+                                ImGui::Separator();
+                                if (ImGui::MenuItem("Open Folder")) {
+                                    m_currentDirectory /= p.filename();
+                                    m_selectedAssetPath.clear();
+                                }
+                                ImGui::Separator();
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                if (ImGui::MenuItem("Delete Folder (Permanent)...")) {
+                                    m_assetToDelete = p;
+                                    m_showDeleteAssetModal = true;
+                                }
+                                ImGui::PopStyleColor();
+                                ImGui::EndPopup();
+                            }
                             ImGui::SameLine();
                         } else {
                             std::string ext = p.extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-                            if (ext == ".obj") {
+                            if (ext == ".obj" || ext == ".gltf" || ext == ".fbx") {
                                 std::string label = "[3D Model]\n" + filename;
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.4f, 0.25f, 0.9f));
-                                if (ImGui::Button(label.c_str(), ImVec2(140, 45))) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.4f, 0.65f, 0.4f, 1.0f) : ImVec4(0.25f, 0.4f, 0.25f, 0.9f));
+                                if (ImGui::Button((label + "##model_" + filename).c_str(), ImVec2(140, 48))) {
+                                    m_selectedAssetPath = p;
                                     std::string tex = "";
                                     std::string candTex = p.parent_path().string() + "/" + p.stem().string() + ".png";
                                     if (std::filesystem::exists(candTex)) tex = candTex;
@@ -2129,11 +2188,32 @@ void SceneEditor::renderAssetBrowser() {
                                     m_selectedEntity = spawnModel(p.stem().string(), p.string(), tex, spawnPos, 1.0f);
                                 }
                                 ImGui::PopStyleColor();
+
+                                if (ImGui::BeginPopupContextItem()) {
+                                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Model: %s", filename.c_str());
+                                    ImGui::Separator();
+                                    if (ImGui::MenuItem("Spawn 3D Model in Scene")) {
+                                        std::string tex = "";
+                                        std::string candTex = p.parent_path().string() + "/" + p.stem().string() + ".png";
+                                        if (std::filesystem::exists(candTex)) tex = candTex;
+                                        else if (std::filesystem::exists("assets/textures/colormap.png")) tex = "assets/textures/colormap.png";
+                                        m_selectedEntity = spawnModel(p.stem().string(), p.string(), tex, spawnPos, 1.0f);
+                                    }
+                                    ImGui::Separator();
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                    if (ImGui::MenuItem("Delete Model File...")) {
+                                        m_assetToDelete = p;
+                                        m_showDeleteAssetModal = true;
+                                    }
+                                    ImGui::PopStyleColor();
+                                    ImGui::EndPopup();
+                                }
                                 ImGui::SameLine();
-                            } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
+                            } else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") {
                                 std::string label = "[Texture]\n" + filename;
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.3f, 0.2f, 0.9f));
-                                if (ImGui::Button(label.c_str(), ImVec2(130, 45))) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.6f, 0.45f, 0.3f, 1.0f) : ImVec4(0.4f, 0.3f, 0.2f, 0.9f));
+                                if (ImGui::Button((label + "##tex_" + filename).c_str(), ImVec2(130, 48))) {
+                                    m_selectedAssetPath = p;
                                     if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
                                         auto& mr = registry().get<MeshRenderer>(m_selectedEntity);
                                         mr.texturePath = p.string();
@@ -2142,15 +2222,74 @@ void SceneEditor::renderAssetBrowser() {
                                     }
                                 }
                                 ImGui::PopStyleColor();
+
+                                if (ImGui::BeginPopupContextItem()) {
+                                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Texture: %s", filename.c_str());
+                                    ImGui::Separator();
+                                    if (ImGui::MenuItem("Apply Texture to Selected Mesh")) {
+                                        if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                                            auto& mr = registry().get<MeshRenderer>(m_selectedEntity);
+                                            mr.texturePath = p.string();
+                                            mr.material.diffuseMap = Assets::Texture(p.string(), true);
+                                            mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
+                                        }
+                                    }
+                                    ImGui::Separator();
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                    if (ImGui::MenuItem("Delete Texture File...")) {
+                                        m_assetToDelete = p;
+                                        m_showDeleteAssetModal = true;
+                                    }
+                                    ImGui::PopStyleColor();
+                                    ImGui::EndPopup();
+                                }
                                 ImGui::SameLine();
                             } else if (ext == ".json") {
                                 std::string label = "[Scene]\n" + filename;
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.2f, 0.4f, 0.9f));
-                                if (ImGui::Button(label.c_str(), ImVec2(130, 45))) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.55f, 0.3f, 0.6f, 1.0f) : ImVec4(0.35f, 0.2f, 0.4f, 0.9f));
+                                if (ImGui::Button((label + "##scene_" + filename).c_str(), ImVec2(130, 48))) {
+                                    m_selectedAssetPath = p;
                                     loadSceneFromFile(p.string());
                                     strncpy(m_sceneFileBuf, p.string().c_str(), sizeof(m_sceneFileBuf));
                                 }
                                 ImGui::PopStyleColor();
+
+                                if (ImGui::BeginPopupContextItem()) {
+                                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene: %s", filename.c_str());
+                                    ImGui::Separator();
+                                    if (ImGui::MenuItem("Load Scene File")) {
+                                        loadSceneFromFile(p.string());
+                                        strncpy(m_sceneFileBuf, p.string().c_str(), sizeof(m_sceneFileBuf));
+                                    }
+                                    ImGui::Separator();
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                    if (ImGui::MenuItem("Delete Scene File...")) {
+                                        m_assetToDelete = p;
+                                        m_showDeleteAssetModal = true;
+                                    }
+                                    ImGui::PopStyleColor();
+                                    ImGui::EndPopup();
+                                }
+                                ImGui::SameLine();
+                            } else {
+                                std::string label = "[File]\n" + filename;
+                                ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.45f, 0.45f, 0.5f, 1.0f) : ImVec4(0.25f, 0.25f, 0.3f, 0.9f));
+                                if (ImGui::Button((label + "##file_" + filename).c_str(), ImVec2(130, 48))) {
+                                    m_selectedAssetPath = p;
+                                }
+                                ImGui::PopStyleColor();
+
+                                if (ImGui::BeginPopupContextItem()) {
+                                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "File: %s", filename.c_str());
+                                    ImGui::Separator();
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                    if (ImGui::MenuItem("Delete File...")) {
+                                        m_assetToDelete = p;
+                                        m_showDeleteAssetModal = true;
+                                    }
+                                    ImGui::PopStyleColor();
+                                    ImGui::EndPopup();
+                                }
                                 ImGui::SameLine();
                             }
                         }
@@ -2601,6 +2740,59 @@ void SceneEditor::renderBuildModal() {
         }
     }
     ImGui::End();
+}
+
+void SceneEditor::renderDeleteAssetModal() {
+    if (!m_showDeleteAssetModal) return;
+
+    ImGui::OpenPopup("Delete Asset Confirmation");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480, 200), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("Delete Asset Confirmation", &m_showDeleteAssetModal, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "[WARNING] Permanent Deletion");
+        ImGui::Separator();
+
+        bool isDir = std::filesystem::is_directory(m_assetToDelete);
+        ImGui::TextWrapped("Are you sure you want to permanently delete this %s?", isDir ? "directory and ALL its contents" : "file");
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Target: %s", m_assetToDelete.string().c_str());
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+        if (ImGui::Button("Yes, Delete Permanently", ImVec2(190, 32))) {
+            std::error_code ec;
+            if (isDir) {
+                std::filesystem::remove_all(m_assetToDelete, ec);
+            } else {
+                std::filesystem::remove(m_assetToDelete, ec);
+            }
+            if (ec) {
+                std::cerr << "[SceneEditor] Failed to delete: " << ec.message() << "\n";
+            } else {
+                std::cout << "[SceneEditor] Successfully deleted: " << m_assetToDelete << "\n";
+            }
+            if (m_selectedAssetPath == m_assetToDelete) {
+                m_selectedAssetPath.clear();
+            }
+            m_assetToDelete.clear();
+            m_showDeleteAssetModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 32))) {
+            m_assetToDelete.clear();
+            m_showDeleteAssetModal = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
 }
 
 void SceneEditor::renderStats() {
