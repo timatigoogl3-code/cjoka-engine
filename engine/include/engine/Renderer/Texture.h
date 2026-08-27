@@ -26,6 +26,8 @@ public:
 
     static std::shared_ptr<Texture> Load(const std::string& path, bool flipY = true, bool srgb = false);
     static std::shared_ptr<Texture> White();
+    static std::shared_ptr<Texture> Black();
+    static std::shared_ptr<Texture> FlatNormal();
     static std::shared_ptr<Texture> Checker(int size = 256, int checker = 32);
 
 private:

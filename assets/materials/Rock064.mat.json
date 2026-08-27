@@ -1,0 +1,19 @@
+{
+  "name": "Rock 064",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.65,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Rock064_Color.jpg",
+  "normalMap": "assets/textures/pbr/Rock064_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Rock064_Roughness.jpg"
+}

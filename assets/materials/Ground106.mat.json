@@ -1,0 +1,19 @@
+{
+  "name": "Ground 106",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.65,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Ground106_Color.jpg",
+  "normalMap": "assets/textures/pbr/Ground106_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Ground106_Roughness.jpg"
+}

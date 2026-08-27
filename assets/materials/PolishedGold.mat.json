@@ -1,0 +1,19 @@
+{
+  "name": "Polished Gold",
+  "albedo": [
+    1.0,
+    0.78,
+    0.28
+  ],
+  "metallic": 1.0,
+  "roughness": 0.12,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "",
+  "normalMap": "",
+  "specularMap": ""
+}

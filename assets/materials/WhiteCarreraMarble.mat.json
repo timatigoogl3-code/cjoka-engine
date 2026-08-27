@@ -1,0 +1,19 @@
+{
+  "name": "White Carrera Marble",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.05,
+  "roughness": 0.12,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Marble024_Color.jpg",
+  "normalMap": "assets/textures/pbr/Marble024_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Marble024_Roughness.jpg"
+}

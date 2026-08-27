@@ -1,0 +1,19 @@
+{
+  "name": "Red Brick Wall",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.85,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/brick_wall_albedo.png",
+  "normalMap": "assets/textures/pbr/brick_wall_normal.png",
+  "specularMap": "assets/textures/pbr/brick_wall_spec.png"
+}

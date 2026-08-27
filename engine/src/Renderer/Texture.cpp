@@ -36,11 +36,11 @@ void Texture::create(int w,int h,const unsigned char* data,int ch,bool srgb) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    // анизотропия — резко улучшает горшок на расстоянии
+    // 16x Anisotropic Filtering for crystal clear textures at any angle
     if (GLAD_GL_EXT_texture_filter_anisotropic) {
         float maxAniso = 0.0f;
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
-        float aniso = std::min(8.0f, maxAniso);
+        float aniso = std::min(16.0f, maxAniso);
         glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
     }
     GLenum fmt = GL_RGB;
@@ -50,8 +50,6 @@ void Texture::create(int w,int h,const unsigned char* data,int ch,bool srgb) {
     else if(ch==1){ fmt=GL_RED; internal=GL_RED; }
     glTexImage2D(GL_TEXTURE_2D,0,internal,w,h,0,fmt,GL_UNSIGNED_BYTE,data);
     glGenerateMipmap(GL_TEXTURE_2D);
-    // трилинейка уже, но явно выставим LOD
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 8);
     glBindTexture(GL_TEXTURE_2D,0);
 }
 
@@ -76,6 +74,23 @@ std::shared_ptr<Texture> Texture::White() {
         white = std::make_shared<Texture>(1,1,px,4);
     }
     return white;
+}
+std::shared_ptr<Texture> Texture::Black() {
+    static std::shared_ptr<Texture> black;
+    if (!black) {
+        unsigned char px[4]={0,0,0,255};
+        black = std::make_shared<Texture>(1,1,px,4);
+    }
+    return black;
+}
+std::shared_ptr<Texture> Texture::FlatNormal() {
+    static std::shared_ptr<Texture> flat;
+    if (!flat) {
+        // Flat normal: (0, 0, 1) mapped to 0..255 RGB => (128, 128, 255)
+        unsigned char px[4]={128,128,255,255};
+        flat = std::make_shared<Texture>(1,1,px,4);
+    }
+    return flat;
 }
 std::shared_ptr<Texture> Texture::Checker(int size, int checker) {
     std::vector<unsigned char> data(size*size*4);

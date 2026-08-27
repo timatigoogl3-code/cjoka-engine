@@ -1,0 +1,19 @@
+{
+  "name": "Carbon Fiber",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.1,
+  "roughness": 0.35,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/carbon_fiber_albedo.png",
+  "normalMap": "assets/textures/pbr/carbon_fiber_normal.png",
+  "specularMap": "assets/textures/pbr/carbon_fiber_spec.png"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "Rough Cliff Rock",
+  "albedo": [
+    0.9,
+    0.9,
+    0.9
+  ],
+  "metallic": 0.0,
+  "roughness": 0.95,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Rock035_Color.jpg",
+  "normalMap": "assets/textures/pbr/Rock035_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Rock035_Roughness.jpg"
+}

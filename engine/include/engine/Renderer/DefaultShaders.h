@@ -125,12 +125,13 @@ void main(){
     vColor=aColor; vUV=aUV;
     vec4 wp=uModel*vec4(aPos,1.0); vWorldPos=wp.xyz;
     vNormal=normalize(uNormalMat*aNormal);
-    // TBN для normal mapping (берём касательные из позиций)
-    vec3 T = normalize(uNormalMat * vec3(1.0, 0.0, 0.0));
     vec3 N = vNormal;
-    T = normalize(T - dot(T, N) * N);
+    vec3 c1 = cross(N, vec3(0.0, 0.0, 1.0));
+    vec3 c2 = cross(N, vec3(0.0, 1.0, 0.0));
+    vec3 T = length(c1) > length(c2) ? normalize(c1) : normalize(c2);
+    vec3 B = cross(N, T);
     vTangent = T;
-    vBitangent = cross(N, T);
+    vBitangent = B;
     // Motion vectors
     vCurrClip = uMVP * vec4(aPos, 1.0);
     vec4 prevWp = uPrevModel * vec4(aPos, 1.0);

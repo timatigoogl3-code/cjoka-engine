@@ -1,0 +1,19 @@
+{
+  "name": "Corroded Heavy Rust",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.6,
+  "roughness": 0.8,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Rust003_Color.jpg",
+  "normalMap": "assets/textures/pbr/Rust003_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Rust003_Roughness.jpg"
+}

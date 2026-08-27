@@ -1,0 +1,19 @@
+{
+  "name": "Modern Ceramic Tiles",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.25,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Tiles141_Color.jpg",
+  "normalMap": "assets/textures/pbr/Tiles141_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Tiles141_Roughness.jpg"
+}

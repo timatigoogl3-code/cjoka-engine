@@ -1,0 +1,19 @@
+{
+  "name": "Paving Stones 151",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.65,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/PavingStones151_Color.jpg",
+  "normalMap": "assets/textures/pbr/PavingStones151_Normal.jpg",
+  "specularMap": "assets/textures/pbr/PavingStones151_Roughness.jpg"
+}

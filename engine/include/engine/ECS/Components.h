@@ -85,6 +85,11 @@ struct Material {
     bool useSpecularMap = false;
     bool useNormalMap = false;
 
+    std::string materialPath = "";
+    std::string diffuseMapPath = "";
+    std::string normalMapPath = "";
+    std::string specularMapPath = "";
+
     // --- Пресеты для быстрой разработки ---
     static Material Default() { return Material{}; }
     static Material Dielectric(const glm::vec3& color = glm::vec3(0.8f), float rough = 0.5f) {

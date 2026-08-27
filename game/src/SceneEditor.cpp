@@ -746,6 +746,7 @@ void SceneEditor::onImGuiRender() {
     if (m_showHierarchy) renderHierarchy();
     if (m_showInspector) renderInspector();
     if (m_showAssetBrowser) renderAssetBrowser();
+    if (m_showMaterialPalette) renderMaterialPalette();
     if (m_showAtmosphereEditor) renderAtmosphereEditor();
     if (m_showGraphicsSettings) renderGraphicsSettings();
     if (m_showClusterLODSettings) renderClusterLODSettings();
@@ -753,6 +754,8 @@ void SceneEditor::onImGuiRender() {
     if (m_showCameraPreview) renderCameraPreview();
     if (m_showBuildModal) renderBuildModal();
     if (m_showDeleteAssetModal) renderDeleteAssetModal();
+    if (m_showCreateAssetModal) renderCreateAssetModal();
+    if (m_showRenameAssetModal) renderRenameAssetModal();
 }
 
 void SceneEditor::renderMenuBar() {
@@ -763,6 +766,17 @@ void SceneEditor::renderMenuBar() {
             ImGui::Separator();
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) saveSceneToFile(m_sceneFileBuf);
             if (ImGui::MenuItem("Load Scene", "Ctrl+O")) loadSceneFromFile(m_sceneFileBuf);
+            ImGui::Separator();
+            if (ImGui::MenuItem("New PBR Material...")) {
+                m_createAssetType = 0;
+                strncpy(m_createAssetNameBuf, "NewPBRMaterial", sizeof(m_createAssetNameBuf));
+                m_showCreateAssetModal = true;
+            }
+            if (ImGui::MenuItem("New C++ Script Template...")) {
+                m_createAssetType = 3;
+                strncpy(m_createAssetNameBuf, "CustomGameScript", sizeof(m_createAssetNameBuf));
+                m_showCreateAssetModal = true;
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Build Standalone Game Executable...", "F7")) buildStandaloneGame();
             ImGui::Separator();
@@ -784,6 +798,16 @@ void SceneEditor::renderMenuBar() {
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Layouts")) {
+            if (ImGui::MenuItem("Studio Default")) applyLayoutPreset(0);
+            if (ImGui::MenuItem("Level Design & World Building")) applyLayoutPreset(1);
+            if (ImGui::MenuItem("Material & Shading Artist")) applyLayoutPreset(2);
+            if (ImGui::MenuItem("Game Testing / Minimal HUD")) applyLayoutPreset(3);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reset to Default Layout")) applyLayoutPreset(0);
+            ImGui::EndMenu();
+        }
+
         if (ImGui::BeginMenu("Gizmo")) {
             if (ImGui::MenuItem("Translate", "W", m_gizmoOperation == 0)) m_gizmoOperation = 0;
             if (ImGui::MenuItem("Rotate", "E", m_gizmoOperation == 1)) m_gizmoOperation = 1;
@@ -800,37 +824,16 @@ void SceneEditor::renderMenuBar() {
             ImGui::MenuItem("Hierarchy", "Alt+1", &m_showHierarchy);
             ImGui::MenuItem("Inspector", "Alt+2", &m_showInspector);
             ImGui::MenuItem("Asset Browser", "Alt+3", &m_showAssetBrowser);
+            ImGui::MenuItem("Material Palette / PBR Library", "Alt+9", &m_showMaterialPalette);
             ImGui::MenuItem("Atmosphere & Sky", "Alt+4", &m_showAtmosphereEditor);
             ImGui::MenuItem("Graphics & RTX / GI Settings", "Alt+5", &m_showGraphicsSettings);
             ImGui::MenuItem("ClusterLOD / Nanite Settings", "Alt+6", &m_showClusterLODSettings);
             ImGui::MenuItem("Performance Metrics", "Alt+7", &m_showStats);
             ImGui::MenuItem("Game Camera Preview", "Alt+8", &m_showCameraPreview);
             ImGui::Separator();
-            if (ImGui::MenuItem("Show Default Panels")) {
-                m_showHierarchy = true;
-                m_showInspector = true;
-                m_showAssetBrowser = true;
-            }
-            if (ImGui::MenuItem("Show All Windows")) {
-                m_showHierarchy = true;
-                m_showInspector = true;
-                m_showAssetBrowser = true;
-                m_showAtmosphereEditor = true;
-                m_showGraphicsSettings = true;
-                m_showClusterLODSettings = true;
-                m_showStats = true;
-                m_showCameraPreview = true;
-            }
-            if (ImGui::MenuItem("Hide All Windows")) {
-                m_showHierarchy = false;
-                m_showInspector = false;
-                m_showAssetBrowser = false;
-                m_showAtmosphereEditor = false;
-                m_showGraphicsSettings = false;
-                m_showClusterLODSettings = false;
-                m_showStats = false;
-                m_showCameraPreview = false;
-            }
+            if (ImGui::MenuItem("Show Default Panels")) applyLayoutPreset(0);
+            if (ImGui::MenuItem("Show All Windows")) applyLayoutPreset(1);
+            if (ImGui::MenuItem("Hide All Windows")) applyLayoutPreset(3);
             ImGui::Separator();
             ImGui::MenuItem("Show 3D Colliders (Translucent)", nullptr, &m_showColliders);
             ImGui::MenuItem("Toggle Full Editor UI", "Tab", &m_showUI);
@@ -1440,6 +1443,43 @@ void SceneEditor::renderHierarchy() {
                 m_selectedEntity = e;
             }
 
+            // Drag & Drop Source: drag this entity
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                ImGui::SetDragDropPayload("HIERARCHY_ENTITY", &e, sizeof(Entity));
+                ImGui::Text("Move %s", name.c_str());
+                ImGui::EndDragDropSource();
+            }
+
+            // Drag & Drop Target: drop another entity onto this one to make it a child
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
+                    Entity dropped = *(const Entity*)payload->Data;
+                    if (dropped != e && registry().valid(dropped)) {
+                        auto& h = registry().has<Hierarchy>(dropped) ? registry().get<Hierarchy>(dropped) : registry().emplace<Hierarchy>(dropped);
+                        h.parent = e;
+                    }
+                }
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MATERIAL_PATH")) {
+                    const char* matPath = (const char*)payload->Data;
+                    applyMaterialToEntity(e, matPath);
+                }
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                    const char* assetPath = (const char*)payload->Data;
+                    std::string p = assetPath;
+                    if (p.find(".mat.json") != std::string::npos) {
+                        applyMaterialToEntity(e, p);
+                    } else if (p.find(".png") != std::string::npos || p.find(".jpg") != std::string::npos) {
+                        if (registry().has<MeshRenderer>(e)) {
+                            auto& mr = registry().get<MeshRenderer>(e);
+                            mr.material.diffuseMapPath = p;
+                            mr.material.diffuseMap = Assets::Texture(p, true);
+                            mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
+                        }
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
             if (opened) {
                 for (Entity c : children) {
                     self(self, c);
@@ -1454,6 +1494,19 @@ void SceneEditor::renderHierarchy() {
                 drawEntityNode(drawEntityNode, e);
             }
         }
+
+        // Empty space drag drop target: drop here to detach/unparent
+        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, 35.0f));
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HIERARCHY_ENTITY")) {
+                Entity dropped = *(const Entity*)payload->Data;
+                if (registry().valid(dropped) && registry().has<Hierarchy>(dropped)) {
+                    registry().remove<Hierarchy>(dropped);
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+
         ImGui::EndChild();
     }
     ImGui::End();
@@ -1604,7 +1657,7 @@ void SceneEditor::renderInspector() {
         }
 
         // 4. MeshRenderer & PBR Material
-        if (registry().has<MeshRenderer>(e) && ImGui::CollapsingHeader("Mesh & Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (registry().has<MeshRenderer>(e) && ImGui::CollapsingHeader("Mesh & PBR Material", ImGuiTreeNodeFlags_DefaultOpen)) {
             auto& mr = registry().get<MeshRenderer>(e);
             ImGui::Checkbox("Visible", &mr.visible);
             ImGui::SameLine();
@@ -1618,39 +1671,70 @@ void SceneEditor::renderInspector() {
                 mr.assetPath = assetBuf;
             }
 
-            char texBuf[256];
-            strncpy(texBuf, mr.texturePath.c_str(), sizeof(texBuf));
-            if (ImGui::InputText("Texture Path", texBuf, sizeof(texBuf))) {
-                mr.texturePath = texBuf;
-                if (!mr.texturePath.empty()) {
-                    mr.material.diffuseMap = Assets::Texture(mr.texturePath, true);
-                    mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
+            ImGui::SeparatorText("Material Asset");
+            std::string matDisplayName = mr.material.materialPath.empty() ? "[Custom / Embedded Material]" : std::filesystem::path(mr.material.materialPath).stem().string();
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "Material: %s", matDisplayName.c_str());
+
+            // DragDrop Target for material assignment
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MATERIAL_PATH")) {
+                    const char* matPath = (const char*)payload->Data;
+                    loadMaterialFromFile(matPath, mr.material);
                 }
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                    const char* assetPath = (const char*)payload->Data;
+                    std::string p = assetPath;
+                    if (p.find(".mat.json") != std::string::npos) {
+                        loadMaterialFromFile(p, mr.material);
+                    }
+                }
+                ImGui::EndDragDropTarget();
             }
 
-            ImGui::SeparatorText("PBR Material Properties");
-            ImGui::ColorEdit3("Albedo Tint", &mr.material.albedo.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_PickerHueWheel);
+            // Material Quick Picker Dropdown
+            if (ImGui::BeginCombo("Select Material", matDisplayName.c_str())) {
+                if (std::filesystem::exists("assets/materials")) {
+                    for (const auto& entry : std::filesystem::recursive_directory_iterator("assets/materials")) {
+                        if (entry.is_regular_file() && (entry.path().extension() == ".json" || entry.path().string().find(".mat") != std::string::npos)) {
+                            std::string stem = entry.path().stem().string();
+                            bool isSel = (mr.material.materialPath == entry.path().string());
+                            if (ImGui::Selectable(stem.c_str(), isSel)) {
+                                loadMaterialFromFile(entry.path().string(), mr.material);
+                            }
+                            if (isSel) ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::SeparatorText("PBR Material Parameters");
+            ImGui::ColorEdit3("Albedo Color", &mr.material.albedo.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_PickerHueWheel);
             ImGui::SliderFloat("Metallic", &mr.material.metallic, 0.0f, 1.0f);
             ImGui::SliderFloat("Roughness", &mr.material.roughness, 0.04f, 1.0f);
             ImGui::SliderFloat("AO Intensity", &mr.material.ao, 0.0f, 1.0f);
             ImGui::ColorEdit3("Emissive Color", &mr.material.emissive.x, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
 
-            ImGui::SeparatorText("Material Presets");
-            if (ImGui::Button("Gold")) { mr.material.albedo = {1.0f, 0.76f, 0.33f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.22f; }
-            ImGui::SameLine();
-            if (ImGui::Button("Chrome")) { mr.material.albedo = {0.95f, 0.95f, 0.95f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.08f; }
-            ImGui::SameLine();
-            if (ImGui::Button("Copper")) { mr.material.albedo = {0.95f, 0.64f, 0.54f}; mr.material.metallic = 1.0f; mr.material.roughness = 0.3f; }
-            ImGui::SameLine();
-            if (ImGui::Button("Rubber")) { mr.material.albedo = {0.1f, 0.1f, 0.1f}; mr.material.metallic = 0.0f; mr.material.roughness = 0.9f; }
-            
-            if (ImGui::Button("Neon Cyan")) { mr.material.emissive = {0.0f, 8.5f, 10.0f}; }
-            ImGui::SameLine();
-            if (ImGui::Button("Hot Orange")) { mr.material.emissive = {10.0f, 3.5f, 0.0f}; }
-            ImGui::SameLine();
-            if (ImGui::Button("Laser Red")) { mr.material.emissive = {12.0f, 0.2f, 0.2f}; }
-            ImGui::SameLine();
-            if (ImGui::Button("Reset PBR")) { mr.material = Material(); }
+            ImGui::SeparatorText("Texture Maps (via Material)");
+            if (!mr.material.diffuseMapPath.empty()) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "[ALB] %s", std::filesystem::path(mr.material.diffuseMapPath).filename().string().c_str());
+            } else {
+                ImGui::TextDisabled("[ALB] No Albedo Map (Uniform Color)");
+            }
+            if (!mr.material.normalMapPath.empty()) {
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "[NRM] %s", std::filesystem::path(mr.material.normalMapPath).filename().string().c_str());
+                ImGui::SameLine();
+                ImGui::Checkbox("Use Normal Map", &mr.material.useNormalMap);
+            } else {
+                ImGui::TextDisabled("[NRM] No Normal Map");
+            }
+            if (!mr.material.specularMapPath.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "[SPEC] %s", std::filesystem::path(mr.material.specularMapPath).filename().string().c_str());
+                ImGui::SameLine();
+                ImGui::Checkbox("Use Spec/Rough Map", &mr.material.useSpecularMap);
+            } else {
+                ImGui::TextDisabled("[SPEC] No Specular/Roughness Map");
+            }
 
             ImGui::Separator();
             if (ImGui::Button("Remove Mesh Component")) {
@@ -2087,7 +2171,7 @@ void SceneEditor::renderAssetBrowser() {
 
         if (ImGui::BeginTabBar("AssetCategories")) {
             if (ImGui::BeginTabItem("File Explorer")) {
-                // Breadcrumbs & Navigation Bar
+                // Top Bar: Navigation, Search, Create Asset, Actions
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.25f, 0.35f, 1.0f));
                 if (m_currentDirectory != "assets") {
                     if (ImGui::Button("[ < Back ]")) {
@@ -2096,30 +2180,65 @@ void SceneEditor::renderAssetBrowser() {
                     }
                     ImGui::SameLine();
                 }
-                ImGui::Text("Directory: %s", m_currentDirectory.string().c_str());
                 ImGui::PopStyleColor();
+
+                // [+] Create Asset Button with popup menu
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.35f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.70f, 0.45f, 1.0f));
+                if (ImGui::Button("[+] Add / Create...")) {
+                    ImGui::OpenPopup("CreateAssetDropdown");
+                }
+                ImGui::PopStyleColor(2);
+
+                if (ImGui::BeginPopup("CreateAssetDropdown")) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Create New Asset in: %s", m_currentDirectory.filename().string().c_str());
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("PBR Material (.mat.json)")) {
+                        m_createAssetType = 0;
+                        strncpy(m_createAssetNameBuf, "NewPBRMaterial", sizeof(m_createAssetNameBuf));
+                        m_showCreateAssetModal = true;
+                    }
+                    if (ImGui::MenuItem("Directory / Folder")) {
+                        m_createAssetType = 1;
+                        strncpy(m_createAssetNameBuf, "NewFolder", sizeof(m_createAssetNameBuf));
+                        m_showCreateAssetModal = true;
+                    }
+                    if (ImGui::MenuItem("Scene File (.json)")) {
+                        m_createAssetType = 2;
+                        strncpy(m_createAssetNameBuf, "NewScene", sizeof(m_createAssetNameBuf));
+                        m_showCreateAssetModal = true;
+                    }
+                    if (ImGui::MenuItem("C++ Script Template (.h)")) {
+                        m_createAssetType = 3;
+                        strncpy(m_createAssetNameBuf, "CustomGameScript", sizeof(m_createAssetNameBuf));
+                        m_showCreateAssetModal = true;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::SameLine();
+                ImGui::Text("Dir: %s", m_currentDirectory.string().c_str());
+
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(180.0f);
+                ImGui::InputTextWithHint("##AssetFilter", "Filter assets...", m_assetSearchBuf, sizeof(m_assetSearchBuf));
 
                 if (!m_selectedAssetPath.empty() && std::filesystem::exists(m_selectedAssetPath)) {
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), "| Selected: %s", m_selectedAssetPath.filename().string().c_str());
+                    ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), "| %s", m_selectedAssetPath.filename().string().c_str());
+                    ImGui::SameLine();
+                    if (ImGui::Button("Rename")) {
+                        m_assetToRename = m_selectedAssetPath;
+                        strncpy(m_renameBuf, m_selectedAssetPath.filename().string().c_str(), sizeof(m_renameBuf));
+                        m_showRenameAssetModal = true;
+                    }
                     ImGui::SameLine();
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-                    if (ImGui::Button("Delete Asset (Del)")) {
+                    if (ImGui::Button("Delete")) {
                         m_assetToDelete = m_selectedAssetPath;
                         m_showDeleteAssetModal = true;
                     }
-                    ImGui::PopStyleColor(2);
-                    ImGui::SameLine();
-                    if (ImGui::Button("Deselect")) {
-                        m_selectedAssetPath.clear();
-                    }
-                }
-
-                // Delete key shortcut when an asset is selected
-                if (!m_selectedAssetPath.empty() && Input::IsKeyJustPressed(GLFW_KEY_DELETE)) {
-                    m_assetToDelete = m_selectedAssetPath;
-                    m_showDeleteAssetModal = true;
+                    ImGui::PopStyleColor();
                 }
 
                 ImGui::Separator();
@@ -2130,7 +2249,16 @@ void SceneEditor::renderAssetBrowser() {
                     std::vector<std::filesystem::directory_entry> entries;
                     for (const auto& entry : std::filesystem::directory_iterator(m_currentDirectory)) {
                         std::string fn = entry.path().filename().string();
-                        if (!fn.empty() && fn[0] != '.') entries.push_back(entry);
+                        if (!fn.empty() && fn[0] != '.') {
+                            if (strlen(m_assetSearchBuf) > 0) {
+                                std::string lowerFn = fn;
+                                std::string lowerSearch = m_assetSearchBuf;
+                                std::transform(lowerFn.begin(), lowerFn.end(), lowerFn.begin(), ::tolower);
+                                std::transform(lowerSearch.begin(), lowerSearch.end(), lowerSearch.begin(), ::tolower);
+                                if (lowerFn.find(lowerSearch) == std::string::npos) continue;
+                            }
+                            entries.push_back(entry);
+                        }
                     }
                     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
                         if (a.is_directory() != b.is_directory()) return a.is_directory();
@@ -2154,13 +2282,18 @@ void SceneEditor::renderAssetBrowser() {
                             }
                             ImGui::PopStyleColor();
 
-                            // Right-click context menu
+                            // Right-click context menu for directory
                             if (ImGui::BeginPopupContextItem()) {
                                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Folder: %s", filename.c_str());
                                 ImGui::Separator();
                                 if (ImGui::MenuItem("Open Folder")) {
                                     m_currentDirectory /= p.filename();
                                     m_selectedAssetPath.clear();
+                                }
+                                if (ImGui::MenuItem("Rename Folder...")) {
+                                    m_assetToRename = p;
+                                    strncpy(m_renameBuf, filename.c_str(), sizeof(m_renameBuf));
+                                    m_showRenameAssetModal = true;
                                 }
                                 ImGui::Separator();
                                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
@@ -2176,7 +2309,65 @@ void SceneEditor::renderAssetBrowser() {
                             std::string ext = p.extension().string();
                             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-                            if (ext == ".obj" || ext == ".gltf" || ext == ".fbx") {
+                            if (filename.find(".mat.json") != std::string::npos || ext == ".mat") {
+                                // PBR Material Card
+                                std::string stem = p.stem().string();
+                                if (stem.find(".mat") != std::string::npos) stem = std::filesystem::path(stem).stem().string();
+                                std::string label = "[Material]\n" + stem;
+
+                                Material tempMat;
+                                loadMaterialFromFile(p.string(), tempMat);
+                                ImVec4 swatch = ImVec4(tempMat.albedo.r * 0.7f + 0.1f, tempMat.albedo.g * 0.7f + 0.1f, tempMat.albedo.b * 0.7f + 0.1f, 1.0f);
+
+                                ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.5f, 0.7f, 1.0f, 1.0f) : swatch);
+                                if (ImGui::Button((label + "##mat_" + filename).c_str(), ImVec2(135, 48))) {
+                                    m_selectedAssetPath = p;
+                                    m_selectedMaterialFile = p.string();
+                                    m_editingMaterial = tempMat;
+                                    if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                                        applyMaterialToEntity(m_selectedEntity, p.string());
+                                    }
+                                }
+                                ImGui::PopStyleColor();
+
+                                // Drag & Drop Material Source
+                                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                                    std::string pStr = p.string();
+                                    ImGui::SetDragDropPayload("MATERIAL_PATH", pStr.c_str(), pStr.size() + 1);
+                                    ImGui::SetDragDropPayload("ASSET_PATH", pStr.c_str(), pStr.size() + 1);
+                                    ImGui::Text("Material: %s", stem.c_str());
+                                    ImGui::EndDragDropSource();
+                                }
+
+                                if (ImGui::BeginPopupContextItem()) {
+                                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Material: %s", stem.c_str());
+                                    ImGui::Separator();
+                                    if (ImGui::MenuItem("Apply to Selected Entity")) {
+                                        if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                                            applyMaterialToEntity(m_selectedEntity, p.string());
+                                        }
+                                    }
+                                    if (ImGui::MenuItem("Open in Material Palette")) {
+                                        m_showMaterialPalette = true;
+                                        m_selectedMaterialFile = p.string();
+                                        m_editingMaterial = tempMat;
+                                    }
+                                    if (ImGui::MenuItem("Rename Material...")) {
+                                        m_assetToRename = p;
+                                        strncpy(m_renameBuf, filename.c_str(), sizeof(m_renameBuf));
+                                        m_showRenameAssetModal = true;
+                                    }
+                                    ImGui::Separator();
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                                    if (ImGui::MenuItem("Delete Material...")) {
+                                        m_assetToDelete = p;
+                                        m_showDeleteAssetModal = true;
+                                    }
+                                    ImGui::PopStyleColor();
+                                    ImGui::EndPopup();
+                                }
+                                ImGui::SameLine();
+                            } else if (ext == ".obj" || ext == ".gltf" || ext == ".fbx") {
                                 std::string label = "[3D Model]\n" + filename;
                                 ImGui::PushStyleColor(ImGuiCol_Button, isSel ? ImVec4(0.4f, 0.65f, 0.4f, 1.0f) : ImVec4(0.25f, 0.4f, 0.25f, 0.9f));
                                 if (ImGui::Button((label + "##model_" + filename).c_str(), ImVec2(140, 48))) {
@@ -2189,6 +2380,13 @@ void SceneEditor::renderAssetBrowser() {
                                 }
                                 ImGui::PopStyleColor();
 
+                                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                                    std::string pStr = p.string();
+                                    ImGui::SetDragDropPayload("ASSET_PATH", pStr.c_str(), pStr.size() + 1);
+                                    ImGui::Text("Model: %s", filename.c_str());
+                                    ImGui::EndDragDropSource();
+                                }
+
                                 if (ImGui::BeginPopupContextItem()) {
                                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Model: %s", filename.c_str());
                                     ImGui::Separator();
@@ -2198,6 +2396,11 @@ void SceneEditor::renderAssetBrowser() {
                                         if (std::filesystem::exists(candTex)) tex = candTex;
                                         else if (std::filesystem::exists("assets/textures/colormap.png")) tex = "assets/textures/colormap.png";
                                         m_selectedEntity = spawnModel(p.stem().string(), p.string(), tex, spawnPos, 1.0f);
+                                    }
+                                    if (ImGui::MenuItem("Rename Model...")) {
+                                        m_assetToRename = p;
+                                        strncpy(m_renameBuf, filename.c_str(), sizeof(m_renameBuf));
+                                        m_showRenameAssetModal = true;
                                     }
                                     ImGui::Separator();
                                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
@@ -2216,12 +2419,19 @@ void SceneEditor::renderAssetBrowser() {
                                     m_selectedAssetPath = p;
                                     if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
                                         auto& mr = registry().get<MeshRenderer>(m_selectedEntity);
-                                        mr.texturePath = p.string();
+                                        mr.material.diffuseMapPath = p.string();
                                         mr.material.diffuseMap = Assets::Texture(p.string(), true);
                                         mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
                                     }
                                 }
                                 ImGui::PopStyleColor();
+
+                                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                                    std::string pStr = p.string();
+                                    ImGui::SetDragDropPayload("ASSET_PATH", pStr.c_str(), pStr.size() + 1);
+                                    ImGui::Text("Texture: %s", filename.c_str());
+                                    ImGui::EndDragDropSource();
+                                }
 
                                 if (ImGui::BeginPopupContextItem()) {
                                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Texture: %s", filename.c_str());
@@ -2229,10 +2439,22 @@ void SceneEditor::renderAssetBrowser() {
                                     if (ImGui::MenuItem("Apply Texture to Selected Mesh")) {
                                         if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
                                             auto& mr = registry().get<MeshRenderer>(m_selectedEntity);
-                                            mr.texturePath = p.string();
+                                            mr.material.diffuseMapPath = p.string();
                                             mr.material.diffuseMap = Assets::Texture(p.string(), true);
                                             mr.material.useDiffuseMap = (mr.material.diffuseMap && mr.material.diffuseMap->valid());
                                         }
+                                    }
+                                    if (ImGui::MenuItem("Create PBR Material from this Texture")) {
+                                        Material m;
+                                        m.diffuseMapPath = p.string();
+                                        m.diffuseMap = Assets::Texture(p.string(), true);
+                                        m.useDiffuseMap = true;
+                                        createNewMaterialFile(p.stem().string(), m);
+                                    }
+                                    if (ImGui::MenuItem("Rename Texture...")) {
+                                        m_assetToRename = p;
+                                        strncpy(m_renameBuf, filename.c_str(), sizeof(m_renameBuf));
+                                        m_showRenameAssetModal = true;
                                     }
                                     ImGui::Separator();
                                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
@@ -2261,6 +2483,11 @@ void SceneEditor::renderAssetBrowser() {
                                         loadSceneFromFile(p.string());
                                         strncpy(m_sceneFileBuf, p.string().c_str(), sizeof(m_sceneFileBuf));
                                     }
+                                    if (ImGui::MenuItem("Rename Scene...")) {
+                                        m_assetToRename = p;
+                                        strncpy(m_renameBuf, filename.c_str(), sizeof(m_renameBuf));
+                                        m_showRenameAssetModal = true;
+                                    }
                                     ImGui::Separator();
                                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
                                     if (ImGui::MenuItem("Delete Scene File...")) {
@@ -2281,6 +2508,12 @@ void SceneEditor::renderAssetBrowser() {
 
                                 if (ImGui::BeginPopupContextItem()) {
                                     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "File: %s", filename.c_str());
+                                    ImGui::Separator();
+                                    if (ImGui::MenuItem("Rename File...")) {
+                                        m_assetToRename = p;
+                                        strncpy(m_renameBuf, filename.c_str(), sizeof(m_renameBuf));
+                                        m_showRenameAssetModal = true;
+                                    }
                                     ImGui::Separator();
                                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
                                     if (ImGui::MenuItem("Delete File...")) {
@@ -2914,6 +3147,10 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
             auto& mr = registry().get<MeshRenderer>(e);
             file << ",\n      \"mesh\": {\n";
             file << "        \"assetPath\": \"" << mr.assetPath << "\",\n";
+            file << "        \"materialPath\": \"" << mr.material.materialPath << "\",\n";
+            file << "        \"diffusePath\": \"" << mr.material.diffuseMapPath << "\",\n";
+            file << "        \"normalPath\": \"" << mr.material.normalMapPath << "\",\n";
+            file << "        \"specularPath\": \"" << mr.material.specularMapPath << "\",\n";
             file << "        \"texturePath\": \"" << mr.texturePath << "\",\n";
             file << "        \"albedo\": [" << mr.material.albedo.r << ", " << mr.material.albedo.g << ", " << mr.material.albedo.b << "],\n";
             file << "        \"metallic\": " << mr.material.metallic << ",\n";
@@ -2964,9 +3201,7 @@ void SceneEditor::saveSceneToFile(const std::string& path) {
 
         if (registry().has<NativeScript>(e)) {
             auto& ns = registry().get<NativeScript>(e);
-            file << ",\n      \"script\": {\n";
-            file << "        \"name\": \"" << ns.scriptName << "\"\n";
-            file << "      }";
+            file << ",\n      \"scriptName\": \"" << ns.scriptName << "\"";
         }
 
         file << "\n    }";
@@ -3001,6 +3236,10 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
 
     bool hasMesh = false;
     std::string assetPath = "";
+    std::string materialPath = "";
+    std::string diffusePath = "";
+    std::string normalPath = "";
+    std::string specularPath = "";
     std::string texturePath = "";
     glm::vec3 albedo{1.0f};
     float metallic = 0.0f;
@@ -3052,17 +3291,36 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             ref.add<Camera>(Camera{camFovVal, camNearVal, camFarVal, camPrimaryVal, camPerspVal, 10.0f});
         }
 
-        // 2. Mesh Renderer
+        // 2. Mesh Renderer & PBR Material
         if (hasMesh || !assetPath.empty()) {
             Material mat;
-            mat.albedo = albedo;
-            mat.metallic = metallic;
-            mat.roughness = roughness;
-            mat.ao = ao;
-            mat.emissive = emissive;
-            if (!texturePath.empty()) {
+            if (!materialPath.empty() && std::filesystem::exists(materialPath)) {
+                loadMaterialFromFile(materialPath, mat);
+            } else {
+                mat.albedo = albedo;
+                mat.metallic = metallic;
+                mat.roughness = roughness;
+                mat.ao = ao;
+                mat.emissive = emissive;
+            }
+            if (!diffusePath.empty()) {
+                mat.diffuseMapPath = diffusePath;
+                mat.diffuseMap = Assets::Texture(diffusePath, true);
+                mat.useDiffuseMap = (mat.diffuseMap && mat.diffuseMap->valid());
+            } else if (!texturePath.empty()) {
+                mat.diffuseMapPath = texturePath;
                 mat.diffuseMap = Assets::Texture(texturePath, true);
                 mat.useDiffuseMap = (mat.diffuseMap && mat.diffuseMap->valid());
+            }
+            if (!normalPath.empty()) {
+                mat.normalMapPath = normalPath;
+                mat.normalMap = Assets::Texture(normalPath, true);
+                mat.useNormalMap = (mat.normalMap && mat.normalMap->valid());
+            }
+            if (!specularPath.empty()) {
+                mat.specularMapPath = specularPath;
+                mat.specularMap = Assets::Texture(specularPath, true);
+                mat.useSpecularMap = (mat.specularMap && mat.specularMap->valid());
             }
 
             std::shared_ptr<Mesh3D> mesh;
@@ -3076,7 +3334,7 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
 
             MeshRenderer mr(mesh, mat);
             mr.assetPath = assetPath;
-            mr.texturePath = texturePath;
+            mr.texturePath = mat.diffuseMapPath;
             mr.setClusterLOD(clusterLOD);
             mr.setCastShadow(castShadow);
             ref.add<MeshRenderer>(mr);
@@ -3138,6 +3396,10 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
         hasTransform = false;
         hasMesh = false;
         assetPath = "";
+        materialPath = "";
+        diffusePath = "";
+        normalPath = "";
+        specularPath = "";
         texturePath = "";
         albedo = {1.0f, 1.0f, 1.0f};
         metallic = 0.0f;
@@ -3219,7 +3481,7 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             continue;
         }
 
-        if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos) {
+        if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos && line.find("\"scriptName\":") == std::string::npos) {
             instantiateEntity();
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
@@ -3250,6 +3512,22 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             size_t end = line.find("\"", start);
             assetPath = line.substr(start, end - start);
             hasMesh = true;
+        } else if (line.find("\"materialPath\":") != std::string::npos) {
+            size_t start = line.find("\"", line.find(":") + 1) + 1;
+            size_t end = line.find("\"", start);
+            materialPath = line.substr(start, end - start);
+        } else if (line.find("\"diffusePath\":") != std::string::npos) {
+            size_t start = line.find("\"", line.find(":") + 1) + 1;
+            size_t end = line.find("\"", start);
+            diffusePath = line.substr(start, end - start);
+        } else if (line.find("\"normalPath\":") != std::string::npos) {
+            size_t start = line.find("\"", line.find(":") + 1) + 1;
+            size_t end = line.find("\"", start);
+            normalPath = line.substr(start, end - start);
+        } else if (line.find("\"specularPath\":") != std::string::npos) {
+            size_t start = line.find("\"", line.find(":") + 1) + 1;
+            size_t end = line.find("\"", start);
+            specularPath = line.substr(start, end - start);
         } else if (line.find("\"texturePath\":") != std::string::npos) {
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
@@ -3302,12 +3580,13 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
             parentName = line.substr(start, end - start);
-        } else if (line.find("\"script\":") != std::string::npos) {
+        } else if (line.find("\"scriptName\":") != std::string::npos) {
             hasScript = true;
-        } else if (line.find("\"name\":") != std::string::npos && hasScript) {
             size_t start = line.find("\"", line.find(":") + 1) + 1;
             size_t end = line.find("\"", start);
             scriptName = line.substr(start, end - start);
+        } else if (line.find("\"script\":") != std::string::npos) {
+            hasScript = true;
         }
     }
     instantiateEntity();
@@ -3336,6 +3615,363 @@ void SceneEditor::loadSceneFromFile(const std::string& path) {
     }
 
     std::cout << "[SceneEditor] Successfully loaded scene from " << path << "\n";
+}
+
+void SceneEditor::applyLayoutPreset(int presetId) {
+    if (presetId == 0) {
+        // Studio Default
+        m_showHierarchy = true;
+        m_showInspector = true;
+        m_showAssetBrowser = true;
+        m_showMaterialPalette = false;
+        m_showAtmosphereEditor = false;
+        m_showGraphicsSettings = false;
+        m_showClusterLODSettings = false;
+        m_showStats = false;
+        m_showCameraPreview = true;
+        m_showColliders = true;
+    } else if (presetId == 1) {
+        // Level Design & World Building
+        m_showHierarchy = true;
+        m_showInspector = true;
+        m_showAssetBrowser = true;
+        m_showAtmosphereEditor = true;
+        m_showMaterialPalette = true;
+        m_showGraphicsSettings = false;
+        m_showClusterLODSettings = false;
+        m_showStats = false;
+        m_showCameraPreview = true;
+        m_showColliders = true;
+    } else if (presetId == 2) {
+        // Material & Shading Artist
+        m_showHierarchy = false;
+        m_showInspector = true;
+        m_showAssetBrowser = true;
+        m_showMaterialPalette = true;
+        m_showAtmosphereEditor = true;
+        m_showGraphicsSettings = true;
+        m_showClusterLODSettings = false;
+        m_showStats = false;
+        m_showCameraPreview = true;
+        m_showColliders = false;
+    } else if (presetId == 3) {
+        // Game Testing / Minimal HUD
+        m_showHierarchy = false;
+        m_showInspector = false;
+        m_showAssetBrowser = false;
+        m_showMaterialPalette = false;
+        m_showAtmosphereEditor = false;
+        m_showGraphicsSettings = false;
+        m_showClusterLODSettings = false;
+        m_showStats = true;
+        m_showCameraPreview = false;
+        m_showColliders = false;
+    }
+}
+
+void SceneEditor::loadMaterialFromFile(const std::string& path, Material& outMat) {
+    std::ifstream file(path);
+    if (!file.is_open()) return;
+    outMat.materialPath = path;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.find("\"albedo\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &outMat.albedo.r, &outMat.albedo.g, &outMat.albedo.b);
+        else if (line.find("\"metallic\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &outMat.metallic);
+        else if (line.find("\"roughness\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &outMat.roughness);
+        else if (line.find("\"ao\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &outMat.ao);
+        else if (line.find("\"emissive\":") != std::string::npos) sscanf(line.c_str(), "%*[^[][%f, %f, %f", &outMat.emissive.r, &outMat.emissive.g, &outMat.emissive.b);
+        else if (line.find("\"diffuseMap\":") != std::string::npos || line.find("\"diffusePath\":") != std::string::npos) {
+            size_t s = line.find("\"", line.find(":") + 1) + 1;
+            size_t e = line.find("\"", s);
+            outMat.diffuseMapPath = line.substr(s, e - s);
+            if (!outMat.diffuseMapPath.empty() && std::filesystem::exists(outMat.diffuseMapPath)) {
+                outMat.diffuseMap = Assets::Texture(outMat.diffuseMapPath, true);
+                outMat.useDiffuseMap = (outMat.diffuseMap && outMat.diffuseMap->valid());
+            } else {
+                outMat.diffuseMap = nullptr;
+                outMat.useDiffuseMap = false;
+            }
+        }
+        else if (line.find("\"normalMap\":") != std::string::npos || line.find("\"normalPath\":") != std::string::npos) {
+            size_t s = line.find("\"", line.find(":") + 1) + 1;
+            size_t e = line.find("\"", s);
+            outMat.normalMapPath = line.substr(s, e - s);
+            if (!outMat.normalMapPath.empty() && std::filesystem::exists(outMat.normalMapPath)) {
+                outMat.normalMap = Assets::Texture(outMat.normalMapPath, true);
+                outMat.useNormalMap = (outMat.normalMap && outMat.normalMap->valid());
+            } else {
+                outMat.normalMap = nullptr;
+                outMat.useNormalMap = false;
+            }
+        }
+        else if (line.find("\"specularMap\":") != std::string::npos || line.find("\"specularPath\":") != std::string::npos) {
+            size_t s = line.find("\"", line.find(":") + 1) + 1;
+            size_t e = line.find("\"", s);
+            outMat.specularMapPath = line.substr(s, e - s);
+            if (!outMat.specularMapPath.empty() && std::filesystem::exists(outMat.specularMapPath)) {
+                outMat.specularMap = Assets::Texture(outMat.specularMapPath, true);
+                outMat.useSpecularMap = (outMat.specularMap && outMat.specularMap->valid());
+            } else {
+                outMat.specularMap = nullptr;
+                outMat.useSpecularMap = false;
+            }
+        }
+    }
+}
+
+void SceneEditor::saveMaterialToFile(const std::string& path, const Material& mat) {
+    std::ofstream file(path);
+    if (!file.is_open()) return;
+    file << "{\n";
+    file << "  \"name\": \"" << std::filesystem::path(path).stem().string() << "\",\n";
+    file << "  \"albedo\": [" << mat.albedo.r << ", " << mat.albedo.g << ", " << mat.albedo.b << "],\n";
+    file << "  \"metallic\": " << mat.metallic << ",\n";
+    file << "  \"roughness\": " << mat.roughness << ",\n";
+    file << "  \"ao\": " << mat.ao << ",\n";
+    file << "  \"emissive\": [" << mat.emissive.r << ", " << mat.emissive.g << ", " << mat.emissive.b << "],\n";
+    file << "  \"diffuseMap\": \"" << mat.diffuseMapPath << "\",\n";
+    file << "  \"normalMap\": \"" << mat.normalMapPath << "\",\n";
+    file << "  \"specularMap\": \"" << mat.specularMapPath << "\"\n";
+    file << "}\n";
+    file.close();
+}
+
+void SceneEditor::applyMaterialToEntity(Entity e, const std::string& matPath) {
+    if (!registry().valid(e) || !registry().has<MeshRenderer>(e)) return;
+    auto& mr = registry().get<MeshRenderer>(e);
+    loadMaterialFromFile(matPath, mr.material);
+}
+
+void SceneEditor::createNewMaterialFile(const std::string& matName, const Material& templateMat) {
+    std::string safeName = matName.empty() ? "NewMaterial" : matName;
+    std::string path = (m_currentDirectory / (safeName + ".mat.json")).string();
+    saveMaterialToFile(path, templateMat);
+    m_selectedAssetPath = path;
+    m_selectedMaterialFile = path;
+    m_editingMaterial = templateMat;
+}
+
+void SceneEditor::createNewFolder(const std::string& folderName) {
+    std::string safeName = folderName.empty() ? "NewFolder" : folderName;
+    auto p = m_currentDirectory / safeName;
+    std::filesystem::create_directories(p);
+}
+
+void SceneEditor::createNewSceneFile(const std::string& sceneName) {
+    std::string safeName = sceneName.empty() ? "NewScene" : sceneName;
+    auto p = m_currentDirectory / (safeName + ".json");
+    saveSceneToFile(p.string());
+    m_selectedAssetPath = p;
+}
+
+void SceneEditor::renderMaterialPalette() {
+    ImGui::SetNextWindowPos(ImVec2(16, 520), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 350), ImGuiCond_FirstUseEver);
+
+    if (ImGui::Begin("Material Palette / PBR Library", &m_showMaterialPalette)) {
+        ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), "PBR Material Library");
+        ImGui::SameLine(ImGui::GetWindowWidth() - 150.0f);
+        if (ImGui::Button("[+] New Material", ImVec2(140, 24))) {
+            m_createAssetType = 0;
+            strncpy(m_createAssetNameBuf, "CustomMaterial", sizeof(m_createAssetNameBuf));
+            m_showCreateAssetModal = true;
+        }
+
+        ImGui::Separator();
+
+        // Scan materials folder
+        std::vector<std::string> matFiles;
+        if (std::filesystem::exists("assets/materials")) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator("assets/materials")) {
+                if (entry.is_regular_file() && (entry.path().extension() == ".json" || entry.path().string().find(".mat") != std::string::npos)) {
+                    matFiles.push_back(entry.path().string());
+                }
+            }
+        }
+        std::sort(matFiles.begin(), matFiles.end());
+
+        ImGui::BeginChild("MaterialGrid", ImVec2(0, 160), true);
+        float cardWidth = 115.0f;
+        float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+
+        for (size_t i = 0; i < matFiles.size(); ++i) {
+            const auto& p = matFiles[i];
+            std::string stem = std::filesystem::path(p).stem().string();
+            if (stem.find(".mat") != std::string::npos) stem = std::filesystem::path(stem).stem().string();
+
+            Material tempMat;
+            loadMaterialFromFile(p, tempMat);
+
+            ImVec4 swatchCol = ImVec4(tempMat.albedo.r * 0.7f + 0.1f, tempMat.albedo.g * 0.7f + 0.1f, tempMat.albedo.b * 0.7f + 0.1f, 1.0f);
+
+            ImGui::PushID((int)i);
+            ImGui::BeginGroup();
+            // Color Swatch Button
+            ImGui::PushStyleColor(ImGuiCol_Button, swatchCol);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(swatchCol.x * 1.2f, swatchCol.y * 1.2f, swatchCol.z * 1.2f, 1.0f));
+            if (ImGui::Button(("##swatch_" + stem).c_str(), ImVec2(cardWidth, 36))) {
+                m_selectedMaterialFile = p;
+                m_editingMaterial = tempMat;
+                if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                    applyMaterialToEntity(m_selectedEntity, p);
+                }
+            }
+            ImGui::PopStyleColor(2);
+
+            // DragDrop Source
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                ImGui::SetDragDropPayload("MATERIAL_PATH", p.c_str(), p.size() + 1);
+                ImGui::Text("Material: %s", stem.c_str());
+                ImGui::EndDragDropSource();
+            }
+
+            ImGui::TextWrapped("%s", stem.c_str());
+            ImGui::TextDisabled("R:%.2f M:%.2f", tempMat.roughness, tempMat.metallic);
+            if (tempMat.useNormalMap) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "[NRM]");
+            }
+            ImGui::EndGroup();
+
+            // Right-click context menu on material card
+            if (ImGui::BeginPopupContextItem()) {
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Material: %s", stem.c_str());
+                ImGui::Separator();
+                if (ImGui::MenuItem("Apply to Selected Object")) {
+                    if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                        applyMaterialToEntity(m_selectedEntity, p);
+                    }
+                }
+                if (ImGui::MenuItem("Edit Properties")) {
+                    m_selectedMaterialFile = p;
+                    m_editingMaterial = tempMat;
+                }
+                ImGui::Separator();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+                if (ImGui::MenuItem("Delete Material File...")) {
+                    m_assetToDelete = p;
+                    m_showDeleteAssetModal = true;
+                }
+                ImGui::PopStyleColor();
+                ImGui::EndPopup();
+            }
+
+            float lastButtonX2 = ImGui::GetItemRectMax().x;
+            float nextButtonX2 = lastButtonX2 + ImGui::GetStyle().ItemSpacing.x + cardWidth;
+            if (i + 1 < matFiles.size() && nextButtonX2 < windowVisibleX2) {
+                ImGui::SameLine();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        // Selected Material Live Editor
+        if (!m_selectedMaterialFile.empty()) {
+            ImGui::SeparatorText("Material Editor");
+            std::string editStem = std::filesystem::path(m_selectedMaterialFile).stem().string();
+            ImGui::TextColored(ImVec4(0.3f, 0.85f, 1.0f, 1.0f), "Editing: %s", editStem.c_str());
+
+            bool changed = false;
+            if (ImGui::ColorEdit3("Albedo", &m_editingMaterial.albedo.x, ImGuiColorEditFlags_Float)) changed = true;
+            if (ImGui::SliderFloat("Roughness", &m_editingMaterial.roughness, 0.04f, 1.0f)) changed = true;
+            if (ImGui::SliderFloat("Metallic", &m_editingMaterial.metallic, 0.0f, 1.0f)) changed = true;
+            if (ImGui::SliderFloat("AO", &m_editingMaterial.ao, 0.0f, 1.0f)) changed = true;
+            if (ImGui::ColorEdit3("Emissive", &m_editingMaterial.emissive.x, ImGuiColorEditFlags_Float)) changed = true;
+
+            ImGui::Text("Maps: %s | %s | %s",
+                m_editingMaterial.useDiffuseMap ? "[Albedo]" : "[No Alb]",
+                m_editingMaterial.useNormalMap ? "[Normal]" : "[No Nrm]",
+                m_editingMaterial.useSpecularMap ? "[Spec]" : "[No Spec]");
+
+            if (ImGui::Button("Save Material Changes", ImVec2(180, 28))) {
+                saveMaterialToFile(m_selectedMaterialFile, m_editingMaterial);
+                if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                    applyMaterialToEntity(m_selectedEntity, m_selectedMaterialFile);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Apply to Selected", ImVec2(140, 28))) {
+                if (registry().valid(m_selectedEntity) && registry().has<MeshRenderer>(m_selectedEntity)) {
+                    registry().get<MeshRenderer>(m_selectedEntity).material = m_editingMaterial;
+                }
+            }
+        }
+    }
+    ImGui::End();
+}
+
+void SceneEditor::renderCreateAssetModal() {
+    if (!m_showCreateAssetModal) return;
+
+    ImGui::OpenPopup("Create Asset");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(440, 220), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("Create Asset", &m_showCreateAssetModal, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        const char* typeNames[] = { "PBR Material (.mat.json)", "New Directory / Folder", "Scene (.json)", "C++ Script Template (.h)" };
+        ImGui::Combo("Asset Type", &m_createAssetType, typeNames, IM_ARRAYSIZE(typeNames));
+
+        ImGui::InputText("Asset Name", m_createAssetNameBuf, sizeof(m_createAssetNameBuf));
+        ImGui::TextDisabled("Location: %s", m_currentDirectory.string().c_str());
+        ImGui::Separator();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.35f, 1.0f));
+        if (ImGui::Button("Create Asset", ImVec2(140, 32))) {
+            std::string name = m_createAssetNameBuf;
+            if (m_createAssetType == 0) {
+                createNewMaterialFile(name);
+            } else if (m_createAssetType == 1) {
+                createNewFolder(name);
+            } else if (m_createAssetType == 2) {
+                createNewSceneFile(name);
+            } else if (m_createAssetType == 3) {
+                createNewScriptFile(name);
+            }
+            m_showCreateAssetModal = false;
+        }
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 32))) {
+            m_showCreateAssetModal = false;
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void SceneEditor::renderRenameAssetModal() {
+    if (!m_showRenameAssetModal) return;
+
+    ImGui::OpenPopup("Rename Asset");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(440, 180), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("Rename Asset", &m_showRenameAssetModal, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::Text("Current: %s", m_assetToRename.filename().string().c_str());
+        ImGui::InputText("New Name", m_renameBuf, sizeof(m_renameBuf));
+        ImGui::Separator();
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 1.0f));
+        if (ImGui::Button("Rename", ImVec2(120, 32))) {
+            std::string newName = m_renameBuf;
+            if (!newName.empty()) {
+                auto newPath = m_assetToRename.parent_path() / newName;
+                std::error_code ec;
+                std::filesystem::rename(m_assetToRename, newPath, ec);
+                if (!ec) {
+                    m_selectedAssetPath = newPath;
+                }
+            }
+            m_showRenameAssetModal = false;
+        }
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 32))) {
+            m_showRenameAssetModal = false;
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void SceneEditor::onShutdown() {

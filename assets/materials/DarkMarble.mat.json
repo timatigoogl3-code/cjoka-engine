@@ -1,0 +1,19 @@
+{
+  "name": "Dark Obsidian Marble",
+  "albedo": [
+    0.08,
+    0.09,
+    0.12
+  ],
+  "metallic": 0.1,
+  "roughness": 0.15,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "",
+  "normalMap": "",
+  "specularMap": ""
+}

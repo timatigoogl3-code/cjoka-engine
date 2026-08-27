@@ -59,6 +59,17 @@ private:
     Entity spawnModel(const std::string& name, const std::string& modelPath, const std::string& texPath, const glm::vec3& pos, float scale = 1.0f);
     Entity spawnPointLight(const glm::vec3& pos, const glm::vec3& col = {1.0f, 0.9f, 0.7f}, float intensity = 4.0f, float range = 10.0f);
 
+    void renderMaterialPalette();
+    void renderCreateAssetModal();
+    void renderRenameAssetModal();
+    void applyLayoutPreset(int presetId);
+    void applyMaterialToEntity(Entity e, const std::string& matPath);
+    void loadMaterialFromFile(const std::string& path, Material& outMat);
+    void saveMaterialToFile(const std::string& path, const Material& mat);
+    void createNewMaterialFile(const std::string& matName, const Material& templateMat = Material::Default());
+    void createNewFolder(const std::string& folderName);
+    void createNewSceneFile(const std::string& sceneName);
+
     // Core renderer
     std::unique_ptr<Shader> m_litShader;
     std::unique_ptr<RenderPipeline> m_pipe;
@@ -81,10 +92,11 @@ private:
     bool m_showUI = true;
     bool m_isPlaying = false; // Simulation / Play Mode
 
-    // Window Visibility Flags (controlled via Windows menu)
-    bool m_showHierarchy = false;
-    bool m_showInspector = false;
-    bool m_showAssetBrowser = false;
+    // Window Visibility Flags (controlled via Windows menu & Layout presets)
+    bool m_showHierarchy = true;
+    bool m_showInspector = true;
+    bool m_showAssetBrowser = true;
+    bool m_showMaterialPalette = false;
     bool m_showAtmosphereEditor = false;
     bool m_showGraphicsSettings = false;
     bool m_showClusterLODSettings = false;
@@ -96,8 +108,20 @@ private:
     std::filesystem::path m_currentDirectory = "assets";
     std::filesystem::path m_selectedAssetPath = "";
     std::filesystem::path m_assetToDelete = "";
+    std::filesystem::path m_assetToRename = "";
+    char m_renameBuf[128] = "";
     bool m_showDeleteAssetModal = false;
+    bool m_showRenameAssetModal = false;
+    bool m_showCreateAssetModal = false;
+    int m_createAssetType = 0; // 0: Material, 1: Folder, 2: Scene, 3: Script
+    char m_createAssetNameBuf[128] = "NewAsset";
+    char m_assetSearchBuf[64] = "";
     std::vector<std::string> m_availableScenes;
+    std::vector<std::string> m_availableMaterials;
+
+    // Material Editor selected material
+    std::string m_selectedMaterialFile = "";
+    Material m_editingMaterial;
 
     // Search filter in hierarchy
     char m_searchBuf[128] = "";

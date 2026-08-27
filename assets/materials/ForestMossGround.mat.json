@@ -1,0 +1,19 @@
+{
+  "name": "Forest Moss Ground",
+  "albedo": [
+    0.9,
+    1.0,
+    0.9
+  ],
+  "metallic": 0.0,
+  "roughness": 0.95,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Ground110_Color.jpg",
+  "normalMap": "assets/textures/pbr/Ground110_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Ground110_Roughness.jpg"
+}

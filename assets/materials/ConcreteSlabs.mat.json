@@ -1,0 +1,19 @@
+{
+  "name": "Concrete Slabs",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.9,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/concrete_slabs_albedo.png",
+  "normalMap": "assets/textures/pbr/concrete_slabs_normal.png",
+  "specularMap": "assets/textures/pbr/concrete_slabs_spec.png"
+}

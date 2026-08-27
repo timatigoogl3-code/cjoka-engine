@@ -77,6 +77,10 @@ public:
         bool hasTransform = false;
         bool hasMesh = false;
         std::string assetPath = "";
+        std::string materialPath = "";
+        std::string diffusePath = "";
+        std::string normalPath = "";
+        std::string specularPath = "";
         std::string texturePath = "";
         glm::vec3 albedo{1.0f};
         float metallic = 0.0f, roughness = 0.5f, ao = 1.0f;
@@ -102,6 +106,47 @@ public:
         std::string parentName = "";
         std::vector<std::pair<Entity, std::string>> pendingParents;
 
+        auto loadMat = [](const std::string& path, Material& outMat) {
+            std::ifstream file(path);
+            if (!file.is_open()) return;
+            outMat.materialPath = path;
+            std::string l;
+            while (std::getline(file, l)) {
+                if (l.find("\"albedo\":") != std::string::npos) sscanf(l.c_str(), "%*[^[][%f, %f, %f", &outMat.albedo.r, &outMat.albedo.g, &outMat.albedo.b);
+                else if (l.find("\"metallic\":") != std::string::npos) sscanf(l.c_str(), "%*[^:]: %f", &outMat.metallic);
+                else if (l.find("\"roughness\":") != std::string::npos) sscanf(l.c_str(), "%*[^:]: %f", &outMat.roughness);
+                else if (l.find("\"ao\":") != std::string::npos) sscanf(l.c_str(), "%*[^:]: %f", &outMat.ao);
+                else if (l.find("\"emissive\":") != std::string::npos) sscanf(l.c_str(), "%*[^[][%f, %f, %f", &outMat.emissive.r, &outMat.emissive.g, &outMat.emissive.b);
+                else if (l.find("\"diffuseMap\":") != std::string::npos || l.find("\"diffusePath\":") != std::string::npos) {
+                    size_t s = l.find("\"", l.find(":") + 1) + 1;
+                    size_t e = l.find("\"", s);
+                    outMat.diffuseMapPath = l.substr(s, e - s);
+                    if (!outMat.diffuseMapPath.empty() && std::filesystem::exists(outMat.diffuseMapPath)) {
+                        outMat.diffuseMap = Assets::Texture(outMat.diffuseMapPath, true);
+                        outMat.useDiffuseMap = (outMat.diffuseMap && outMat.diffuseMap->valid());
+                    }
+                }
+                else if (l.find("\"normalMap\":") != std::string::npos || l.find("\"normalPath\":") != std::string::npos) {
+                    size_t s = l.find("\"", l.find(":") + 1) + 1;
+                    size_t e = l.find("\"", s);
+                    outMat.normalMapPath = l.substr(s, e - s);
+                    if (!outMat.normalMapPath.empty() && std::filesystem::exists(outMat.normalMapPath)) {
+                        outMat.normalMap = Assets::Texture(outMat.normalMapPath, true);
+                        outMat.useNormalMap = (outMat.normalMap && outMat.normalMap->valid());
+                    }
+                }
+                else if (l.find("\"specularMap\":") != std::string::npos || l.find("\"specularPath\":") != std::string::npos) {
+                    size_t s = l.find("\"", l.find(":") + 1) + 1;
+                    size_t e = l.find("\"", s);
+                    outMat.specularMapPath = l.substr(s, e - s);
+                    if (!outMat.specularMapPath.empty() && std::filesystem::exists(outMat.specularMapPath)) {
+                        outMat.specularMap = Assets::Texture(outMat.specularMapPath, true);
+                        outMat.useSpecularMap = (outMat.specularMap && outMat.specularMap->valid());
+                    }
+                }
+            }
+        };
+
         auto instantiateEntity = [&]() {
             if (currentName.empty() && !hasTransform) return;
             std::string entName = currentName.empty() ? "Entity" : currentName;
@@ -115,14 +160,33 @@ public:
 
             if (hasMesh || !assetPath.empty()) {
                 Material mat;
-                mat.albedo = albedo;
-                mat.metallic = metallic;
-                mat.roughness = roughness;
-                mat.ao = ao;
-                mat.emissive = emissive;
-                if (!texturePath.empty()) {
+                if (!materialPath.empty() && std::filesystem::exists(materialPath)) {
+                    loadMat(materialPath, mat);
+                } else {
+                    mat.albedo = albedo;
+                    mat.metallic = metallic;
+                    mat.roughness = roughness;
+                    mat.ao = ao;
+                    mat.emissive = emissive;
+                }
+                if (!diffusePath.empty()) {
+                    mat.diffuseMapPath = diffusePath;
+                    mat.diffuseMap = Assets::Texture(diffusePath, true);
+                    mat.useDiffuseMap = (mat.diffuseMap && mat.diffuseMap->valid());
+                } else if (!texturePath.empty()) {
+                    mat.diffuseMapPath = texturePath;
                     mat.diffuseMap = Assets::Texture(texturePath, true);
                     mat.useDiffuseMap = (mat.diffuseMap && mat.diffuseMap->valid());
+                }
+                if (!normalPath.empty()) {
+                    mat.normalMapPath = normalPath;
+                    mat.normalMap = Assets::Texture(normalPath, true);
+                    mat.useNormalMap = (mat.normalMap && mat.normalMap->valid());
+                }
+                if (!specularPath.empty()) {
+                    mat.specularMapPath = specularPath;
+                    mat.specularMap = Assets::Texture(specularPath, true);
+                    mat.useSpecularMap = (mat.specularMap && mat.specularMap->valid());
                 }
 
                 std::shared_ptr<Mesh3D> mesh;
@@ -136,7 +200,7 @@ public:
 
                 MeshRenderer mr(mesh, mat);
                 mr.assetPath = assetPath;
-                mr.texturePath = texturePath;
+                mr.texturePath = mat.diffuseMapPath;
                 mr.setClusterLOD(clusterLOD);
                 mr.setCastShadow(castShadow);
                 ref.add<MeshRenderer>(mr);
@@ -192,6 +256,10 @@ public:
             hasTransform = false;
             hasMesh = false;
             assetPath = "";
+            materialPath = "";
+            diffusePath = "";
+            normalPath = "";
+            specularPath = "";
             texturePath = "";
             albedo = {1.0f, 1.0f, 1.0f};
             metallic = 0.0f;
@@ -273,7 +341,7 @@ public:
                 continue;
             }
 
-            if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos) {
+            if (line.find("\"name\":") != std::string::npos && line.find("\"script\":") == std::string::npos && line.find("\"scriptName\":") == std::string::npos) {
                 instantiateEntity();
                 size_t start = line.find("\"", line.find(":") + 1) + 1;
                 size_t end = line.find("\"", start);
@@ -304,6 +372,22 @@ public:
                 size_t end = line.find("\"", start);
                 assetPath = line.substr(start, end - start);
                 hasMesh = true;
+            } else if (line.find("\"materialPath\":") != std::string::npos) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                materialPath = line.substr(start, end - start);
+            } else if (line.find("\"diffusePath\":") != std::string::npos) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                diffusePath = line.substr(start, end - start);
+            } else if (line.find("\"normalPath\":") != std::string::npos) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                normalPath = line.substr(start, end - start);
+            } else if (line.find("\"specularPath\":") != std::string::npos) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                specularPath = line.substr(start, end - start);
             } else if (line.find("\"texturePath\":") != std::string::npos) {
                 size_t start = line.find("\"", line.find(":") + 1) + 1;
                 size_t end = line.find("\"", start);
@@ -356,12 +440,13 @@ public:
                 size_t start = line.find("\"", line.find(":") + 1) + 1;
                 size_t end = line.find("\"", start);
                 parentName = line.substr(start, end - start);
-            } else if (line.find("\"script\":") != std::string::npos) {
+            } else if (line.find("\"scriptName\":") != std::string::npos) {
                 hasScript = true;
-            } else if (line.find("\"name\":") != std::string::npos && hasScript) {
                 size_t start = line.find("\"", line.find(":") + 1) + 1;
                 size_t end = line.find("\"", start);
                 scriptName = line.substr(start, end - start);
+            } else if (line.find("\"script\":") != std::string::npos) {
+                hasScript = true;
             }
         }
         instantiateEntity();

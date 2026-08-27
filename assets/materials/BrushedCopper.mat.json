@@ -1,0 +1,19 @@
+{
+  "name": "Brushed Copper",
+  "albedo": [
+    0.95,
+    0.64,
+    0.54
+  ],
+  "metallic": 0.95,
+  "roughness": 0.28,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "",
+  "normalMap": "",
+  "specularMap": ""
+}

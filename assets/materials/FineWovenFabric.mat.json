@@ -1,0 +1,19 @@
+{
+  "name": "Fine Woven Fabric",
+  "albedo": [
+    0.8,
+    0.85,
+    0.9
+  ],
+  "metallic": 0.0,
+  "roughness": 0.9,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Fabric052_Color.jpg",
+  "normalMap": "assets/textures/pbr/Fabric052_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Fabric052_Roughness.jpg"
+}

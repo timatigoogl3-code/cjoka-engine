@@ -1,0 +1,19 @@
+{
+  "name": "Hardwood Floor",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.45,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Wood095_Color.jpg",
+  "normalMap": "assets/textures/pbr/Wood095_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Wood095_Roughness.jpg"
+}

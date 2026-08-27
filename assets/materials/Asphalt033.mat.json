@@ -1,0 +1,19 @@
+{
+  "name": "Asphalt 033",
+  "albedo": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.65,
+  "ao": 1.0,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "diffuseMap": "assets/textures/pbr/Asphalt033_Color.jpg",
+  "normalMap": "assets/textures/pbr/Asphalt033_Normal.jpg",
+  "specularMap": "assets/textures/pbr/Asphalt033_Roughness.jpg"
+}
