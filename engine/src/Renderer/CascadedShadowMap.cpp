@@ -118,8 +118,12 @@ std::vector<glm::mat4> CascadedShadowMap::calculateLightMatrices(const glm::mat4
         }
         radius = std::ceil(radius * 16.0f) / 16.0f;
 
-        glm::vec3 lightPos = center - normLightDir * (radius * 2.0f);
-        glm::mat4 lightView = glm::lookAt(lightPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::vec3 up = (std::abs(normLightDir.y) > 0.85f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+        glm::vec3 right = glm::normalize(glm::cross(normLightDir, up));
+        up = glm::normalize(glm::cross(right, normLightDir));
+        float lightDistance = radius * 5.0f;
+        glm::vec3 lightPos = center - normLightDir * lightDistance;
+        glm::mat4 lightView = glm::lookAt(lightPos, center, up);
 
         // Texel stabilization to eliminate shimmering
         float shadowResolution = float(m_size);
@@ -130,7 +134,9 @@ std::vector<glm::mat4> CascadedShadowMap::calculateLightMatrices(const glm::mat4
         float diffX = snappedX - shadowOrigin.x;
         float diffY = snappedY - shadowOrigin.y;
 
-        glm::mat4 lightProj = glm::ortho(-radius + diffX, radius + diffX, -radius + diffY, radius + diffY, 0.0f, radius * 4.0f);
+        float zNear = -radius * 6.0f;
+        float zFar  = lightDistance + radius * 6.0f;
+        glm::mat4 lightProj = glm::ortho(-radius + diffX, radius + diffX, -radius + diffY, radius + diffY, zNear, zFar);
         m_lightMatrices[c] = lightProj * lightView;
     }
 
@@ -143,6 +149,8 @@ void CascadedShadowMap::beginCascade(int cascadeIndex, const glm::mat4& lightMat
     if (cascadeIndex == 0) {
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &m_prevFbo);
         glGetIntegerv(GL_VIEWPORT, m_prevViewport);
+        m_prevCullFace = glIsEnabled(GL_CULL_FACE);
+        glGetIntegerv(GL_CULL_FACE_MODE, &m_prevCullMode);
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
@@ -154,11 +162,17 @@ void CascadedShadowMap::beginCascade(int cascadeIndex, const glm::mat4& lightMat
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     glClear(GL_DEPTH_BUFFER_BIT);
 
+    glEnable(GL_CULL_FACE);
     glCullFace(GL_FRONT);
 }
 
 void CascadedShadowMap::end() {
-    glCullFace(GL_BACK);
+    if (m_prevCullFace) {
+        glEnable(GL_CULL_FACE);
+    } else {
+        glDisable(GL_CULL_FACE);
+    }
+    glCullFace(m_prevCullMode);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glBindFramebuffer(GL_FRAMEBUFFER, m_prevFbo);
     glViewport(m_prevViewport[0], m_prevViewport[1], m_prevViewport[2], m_prevViewport[3]);

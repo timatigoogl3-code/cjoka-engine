@@ -105,10 +105,10 @@ private:
 
 // Конфигурация кластерного LOD
 namespace cluster_lod {
-inline bool  enabled = false;
-inline float thresholdPx = 2.5f;
+inline bool  enabled = true;
+inline float thresholdPx = 1.0f;
 inline int   shadowEveryNFrames = 1;
-inline bool  useQuadric = false;   // true = QEM simplification, false = vertex clustering
+inline bool  useQuadric = true;    // true = QEM simplification, false = vertex clustering
 }
 namespace clusterLOD = cluster_lod;
 namespace nanite = cluster_lod;

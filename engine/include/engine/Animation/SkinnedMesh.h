@@ -74,6 +74,7 @@ public:
 
     size_t vertexCount() const { return m_vertices.size(); }
     size_t indexCount() const { return m_indices.size(); }
+    const std::vector<uint32_t>& indices() const { return m_indices; }
     bool empty() const { return m_indices.empty(); }
 
 private:

@@ -53,8 +53,8 @@ void Input::Update() {
     std::memcpy(s_prevKeys, s_keys, sizeof(s_keys));
     std::memcpy(s_prevMouseButtons, s_mouseButtons, sizeof(s_mouseButtons));
 
-    // Update current keys
-    for (int key = 0; key < MAX_KEYS; ++key) {
+    // Update current keys (GLFW keys range from GLFW_KEY_SPACE=32 to GLFW_KEY_LAST=348)
+    for (int key = GLFW_KEY_SPACE; key <= GLFW_KEY_LAST && key < MAX_KEYS; ++key) {
         s_keys[key] = (glfwGetKey(s_window, key) == GLFW_PRESS);
     }
 

@@ -137,7 +137,7 @@ void World::Step(float dt) {
     m_impl->scene->fetchResults(true);
 }
 
-static void SetupDynamic(PxRigidDynamic* d, const glm::vec3& he, const Rigidbody& rb) {
+static void SetupDynamic(PxRigidDynamic* d, const glm::vec3& /*he*/, const Rigidbody& rb) {
     if (rb.ccd) {
         d->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_CCD, true);
     }

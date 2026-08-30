@@ -1,6 +1,7 @@
 #include "engine/Renderer/MeshLoader.h"
 #include <iostream>
 #include <numbers>
+#include <unordered_map>
 #include <glm/gtc/constants.hpp>
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tinyobjloader/tiny_obj_loader.h"
@@ -25,39 +26,63 @@ std::shared_ptr<Mesh3D> MeshLoader::LoadOBJ(const char* path, bool flipY) {
     verts.reserve(32768);
     idx.reserve(65536);
 
+    struct IndexKey {
+        int v, vt, vn;
+        bool operator==(const IndexKey& o) const { return v == o.v && vt == o.vt && vn == o.vn; }
+    };
+    struct IndexKeyHash {
+        size_t operator()(const IndexKey& k) const noexcept {
+            size_t h = std::hash<int>{}(k.v);
+            h = (h * 397) ^ std::hash<int>{}(k.vt);
+            h = (h * 397) ^ std::hash<int>{}(k.vn);
+            return h;
+        }
+    };
+    std::unordered_map<IndexKey, uint32_t, IndexKeyHash> uniqueVerts;
+    uniqueVerts.reserve(65536);
+
     for (auto& shape : shapes) {
         size_t offset = 0;
         for (size_t f=0; f<shape.mesh.num_face_vertices.size(); ++f) {
             int fv = shape.mesh.num_face_vertices[f];
             for (int v=0; v<fv; ++v) {
                 tinyobj::index_t i = shape.mesh.indices[offset+v];
-                Vertex vert;
-                vert.position = {
-                    attrib.vertices[3*i.vertex_index+0],
-                    attrib.vertices[3*i.vertex_index+1],
-                    attrib.vertices[3*i.vertex_index+2]
-                };
-                if (i.normal_index>=0) {
-                    vert.normal = {
-                        attrib.normals[3*i.normal_index+0],
-                        attrib.normals[3*i.normal_index+1],
-                        attrib.normals[3*i.normal_index+2]
-                    };
+                IndexKey key{ i.vertex_index, i.texcoord_index, i.normal_index };
+                auto it = uniqueVerts.find(key);
+                if (it != uniqueVerts.end()) {
+                    idx.push_back(it->second);
                 } else {
-                    vert.normal = {0,0,1};
-                }
-                if (i.texcoord_index>=0) {
-                    vert.texCoord = {
-                        attrib.texcoords[2*i.texcoord_index+0],
-                        attrib.texcoords[2*i.texcoord_index+1]
+                    uint32_t newIdx = static_cast<uint32_t>(verts.size());
+                    uniqueVerts[key] = newIdx;
+                    idx.push_back(newIdx);
+
+                    Vertex vert;
+                    vert.position = {
+                        attrib.vertices[3*i.vertex_index+0],
+                        attrib.vertices[3*i.vertex_index+1],
+                        attrib.vertices[3*i.vertex_index+2]
                     };
-                    if (flipY) vert.texCoord.y = 1.0f - vert.texCoord.y;
+                    if (i.normal_index>=0) {
+                        vert.normal = {
+                            attrib.normals[3*i.normal_index+0],
+                            attrib.normals[3*i.normal_index+1],
+                            attrib.normals[3*i.normal_index+2]
+                        };
+                    } else {
+                        vert.normal = {0,0,1};
+                    }
+                    if (i.texcoord_index>=0) {
+                        vert.texCoord = {
+                            attrib.texcoords[2*i.texcoord_index+0],
+                            attrib.texcoords[2*i.texcoord_index+1]
+                        };
+                        if (flipY) vert.texCoord.y = 1.0f - vert.texCoord.y;
+                    }
+                    if (!attrib.colors.empty() && i.vertex_index*3+2 < (int)attrib.colors.size()) {
+                        vert.color = { attrib.colors[3*i.vertex_index+0], attrib.colors[3*i.vertex_index+1], attrib.colors[3*i.vertex_index+2] };
+                    } else vert.color = glm::vec3(1.0f);
+                    verts.push_back(vert);
                 }
-                if (!attrib.colors.empty() && i.vertex_index*3+2 < (int)attrib.colors.size()) {
-                    vert.color = { attrib.colors[3*i.vertex_index+0], attrib.colors[3*i.vertex_index+1], attrib.colors[3*i.vertex_index+2] };
-                } else vert.color = glm::vec3(1.0f);
-                idx.push_back((uint32_t)verts.size());
-                verts.push_back(vert);
             }
             offset += fv;
         }
@@ -86,6 +111,7 @@ std::shared_ptr<Mesh3D> MeshLoader::LoadOBJ(const char* path, bool flipY) {
 
 std::shared_ptr<Mesh3D> MeshLoader::Cube(float s){ return std::make_shared<Mesh3D>(Mesh3D::Cube(s)); }
 std::shared_ptr<Mesh3D> MeshLoader::Quad(float s){ return std::make_shared<Mesh3D>(Mesh3D::Quad(s)); }
+std::shared_ptr<Mesh3D> MeshLoader::Plane(float w, float d, int gx, int gz, float uvX, float uvZ){ return std::make_shared<Mesh3D>(Mesh3D::Plane(w, d, gx, gz, uvX, uvZ)); }
 std::shared_ptr<Mesh3D> MeshLoader::Sphere(float r,int sec,int stk){
     std::vector<Vertex> v; std::vector<uint32_t> idx;
     for(int i=0;i<=stk;++i){

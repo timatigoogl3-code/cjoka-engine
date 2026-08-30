@@ -55,7 +55,7 @@ public:
                 float vFactor = (m_gridY > 1) ? static_cast<float>(y) / static_cast<float>(m_gridY - 1) : 0.0f;
                 for (int x = 0; x < m_gridX; ++x) {
                     float uFactor = (m_gridX > 1) ? static_cast<float>(x) / static_cast<float>(m_gridX - 1) : 0.5f;
-                    int idx = y * m_gridX + x;
+                    size_t idx = static_cast<size_t>(y * m_gridX + x);
                     glm::vec3 topPos = glm::mix(pinL, pinR, uFactor);
                     m_particles[idx].pos = topPos - glm::vec3(0.0f, vFactor * m_length, 0.0f);
                     m_particles[idx].prevPos = m_particles[idx].pos;
@@ -69,7 +69,7 @@ public:
         // 1. Интеграция Верле
         for (int y = 0; y < m_gridY; ++y) {
             for (int x = 0; x < m_gridX; ++x) {
-                int idx = y * m_gridX + x;
+                size_t idx = static_cast<size_t>(y * m_gridX + x);
                 auto& p = m_particles[idx];
 
                 if (p.isPinned) {
@@ -99,8 +99,8 @@ public:
         for (int it = 0; it < iterations; ++it) {
             // Структурные связи
             for (const auto& c : m_constraints) {
-                auto& p1 = m_particles[c.p1];
-                auto& p2 = m_particles[c.p2];
+                auto& p1 = m_particles[static_cast<size_t>(c.p1)];
+                auto& p2 = m_particles[static_cast<size_t>(c.p2)];
 
                 glm::vec3 delta = p2.pos - p1.pos;
                 float dist = glm::length(delta);
@@ -165,13 +165,13 @@ public:
 
 private:
     void initGrid() {
-        m_particles.resize(m_gridX * m_gridY);
+        m_particles.resize(static_cast<size_t>(m_gridX * m_gridY));
         float stepX = m_width / static_cast<float>(m_gridX - 1);
         float stepY = m_length / static_cast<float>(m_gridY - 1);
 
         for (int y = 0; y < m_gridY; ++y) {
             for (int x = 0; x < m_gridX; ++x) {
-                int idx = y * m_gridX + x;
+                size_t idx = static_cast<size_t>(y * m_gridX + x);
                 float px = (static_cast<float>(x) - static_cast<float>(m_gridX - 1) * 0.5f) * stepX;
                 float py = -static_cast<float>(y) * stepY;
                 float pz = -0.15f - static_cast<float>(y) * 0.02f; // сзади спины
@@ -211,10 +211,10 @@ private:
         m_indices.clear();
         for (int y = 0; y < m_gridY - 1; ++y) {
             for (int x = 0; x < m_gridX - 1; ++x) {
-                int i0 = y * m_gridX + x;
-                int i1 = i0 + 1;
-                int i2 = i0 + m_gridX;
-                int i3 = i2 + 1;
+                uint32_t i0 = static_cast<uint32_t>(y * m_gridX + x);
+                uint32_t i1 = i0 + 1;
+                uint32_t i2 = i0 + static_cast<uint32_t>(m_gridX);
+                uint32_t i3 = i2 + 1;
 
                 m_indices.push_back(i0);
                 m_indices.push_back(i2);
@@ -228,7 +228,7 @@ private:
     }
 
     void addConstraint(int i1, int i2) {
-        float len = glm::length(m_particles[i1].pos - m_particles[i2].pos);
+        float len = glm::length(m_particles[static_cast<size_t>(i1)].pos - m_particles[static_cast<size_t>(i2)].pos);
         m_constraints.push_back({i1, i2, len});
     }
 
@@ -267,10 +267,10 @@ private:
         glBindVertexArray(m_vao);
 
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, m_particles.size() * sizeof(ClothParticle), nullptr, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_particles.size() * sizeof(ClothParticle)), nullptr, GL_DYNAMIC_DRAW);
 
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_indices.size() * sizeof(uint32_t), m_indices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_indices.size() * sizeof(uint32_t)), m_indices.data(), GL_STATIC_DRAW);
 
         // Position: location 0
         glEnableVertexAttribArray(0);
@@ -294,7 +294,7 @@ private:
     void updateGL() {
         if (!m_vbo) return;
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, m_particles.size() * sizeof(ClothParticle), m_particles.data());
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(m_particles.size() * sizeof(ClothParticle)), m_particles.data());
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 

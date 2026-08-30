@@ -50,7 +50,7 @@ public:
         // Обновление буфера на GPU
         if (m_vbo) {
             glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, m_animVertices.size() * sizeof(WaterVertex), m_animVertices.data());
+            glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(m_animVertices.size() * sizeof(WaterVertex)), m_animVertices.data());
             glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
     }
@@ -75,6 +75,7 @@ public:
         glBindVertexArray(m_vao);
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_indices.size()), GL_UNSIGNED_INT, nullptr);
         glBindVertexArray(0);
+        glDisable(GL_BLEND);
     }
 
 private:
@@ -151,8 +152,8 @@ void main(){
         for (int s = 0; s < m_segments; ++s) {
             int next = (s + 1) % m_segments;
             m_indices.push_back(0);
-            m_indices.push_back(1 + s);
-            m_indices.push_back(1 + next);
+            m_indices.push_back(static_cast<uint32_t>(1 + s));
+            m_indices.push_back(static_cast<uint32_t>(1 + next));
         }
 
         // Индексы остальных колец
@@ -162,10 +163,10 @@ void main(){
             for (int s = 0; s < m_segments; ++s) {
                 int next = (s + 1) % m_segments;
 
-                int i0 = rStart + s;
-                int i1 = nextRStart + s;
-                int i2 = rStart + next;
-                int i3 = nextRStart + next;
+                uint32_t i0 = static_cast<uint32_t>(rStart + s);
+                uint32_t i1 = static_cast<uint32_t>(nextRStart + s);
+                uint32_t i2 = static_cast<uint32_t>(rStart + next);
+                uint32_t i3 = static_cast<uint32_t>(nextRStart + next);
 
                 m_indices.push_back(i0);
                 m_indices.push_back(i1);
@@ -188,10 +189,10 @@ void main(){
         glBindVertexArray(m_vao);
 
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, m_animVertices.size() * sizeof(WaterVertex), m_animVertices.data(), GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_animVertices.size() * sizeof(WaterVertex)), m_animVertices.data(), GL_DYNAMIC_DRAW);
 
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_indices.size() * sizeof(uint32_t), m_indices.data(), GL_STATIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_indices.size() * sizeof(uint32_t)), m_indices.data(), GL_STATIC_DRAW);
 
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), (void*)offsetof(WaterVertex, pos));

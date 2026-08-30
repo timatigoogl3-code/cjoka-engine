@@ -2,6 +2,9 @@
 #include "engine/Engine.h"
 #include "engine/Renderer/RenderPipeline.h"
 #include "engine/Renderer/Shader.h"
+#include "engine/Renderer/LightProbeGrid.h"
+#include "engine/Scene/ChunkManager.h"
+#include "engine/Animation/AnimFile.h"
 #include "GameScripts.h"
 #include <memory>
 #include <vector>
@@ -32,9 +35,11 @@ private:
     void renderAssetBrowser();
     void renderAtmosphereEditor();
     void renderStats();
+    void renderConsole();
     void renderCameraPreview();
     void renderGraphicsSettings();
     void renderClusterLODSettings();
+    void renderWorldStreaming();
     void renderSceneCameraGizmos();
     void renderColliderGizmos();
     void renderPlayModeOverlay();
@@ -43,12 +48,18 @@ private:
     void buildStandaloneGame();
     void renderBuildModal();
     void renderDeleteAssetModal();
+    void stopPlayMode();
 
     // Scene management
     void newScene();
     void loadDefaultShowcase();
     void saveSceneToFile(const std::string& path);
     void loadSceneFromFile(const std::string& path);
+    void saveSceneToStream(std::ostream& out);
+    void loadSceneFromStream(std::istream& in);
+    void saveSceneToString(std::string& out);
+    void loadSceneFromString(const std::string& in);
+    std::string m_playModeSceneBackup;
     void refreshAvailableScenes();
     Entity duplicateEntity(Entity e);
     Entity assembleModularVehicle(const glm::vec3& pos);
@@ -60,6 +71,12 @@ private:
     Entity spawnPointLight(const glm::vec3& pos, const glm::vec3& col = {1.0f, 0.9f, 0.7f}, float intensity = 4.0f, float range = 10.0f);
 
     void renderMaterialPalette();
+    void renderSettingsWindow();
+    void renderProfilerWindow();
+    void renderWeatherWindow();
+    void renderGIWindow();
+    void renderUndoHistoryWindow();
+    void renderSequencerWindow();
     void renderCreateAssetModal();
     void renderRenameAssetModal();
     void applyLayoutPreset(int presetId);
@@ -101,8 +118,29 @@ private:
     bool m_showGraphicsSettings = false;
     bool m_showClusterLODSettings = false;
     bool m_showStats = false;
+    bool m_showProfiler = false;
     bool m_showCameraPreview = true;
     bool m_showColliders = true;
+    bool m_showConsole = true;
+    bool m_showWorldStreaming = false;
+    bool m_showWeather = false;
+    bool m_showGI = false;
+    bool m_showUndoHistory = false;
+    bool m_showSequencer = false;
+    float m_seqPixelsPerSecond = 80.0f;
+    float m_seqScrollTime = 0.0f;
+    int m_seqActiveTab = 0; // 0: Dopesheet, 1: Curves
+    std::string m_activeAnimClipPath = "";
+    std::shared_ptr<Animation::AnimFile> m_activeAnimClip;
+    char m_newAnimNameBuf[64] = "MyAnimation";
+    char m_eventInputBuf[64] = "CutsceneEvent";
+    bool m_seqShowNewAnimModal = false;
+    bool m_showSettings = false; // Unified Render & Environment Settings
+    int m_settingsTab = 0;
+    ChunkManager m_chunkManager;
+
+    Transform m_gizmoStartTransform;
+    bool m_gizmoWasUsing = false;
 
     // Asset Browser filesystem state
     std::filesystem::path m_currentDirectory = "assets";
@@ -124,6 +162,19 @@ private:
     Material m_editingMaterial;
     std::unordered_map<std::string, Material> m_materialCache;
     std::vector<std::string> m_cachedMaterialPaletteFiles;
+    char m_matSearchBuf[64] = "";
+
+    // 3D Real-time Material Preview
+    GLuint m_previewFBO = 0;
+    GLuint m_previewColorTex = 0;
+    GLuint m_previewDepthRBO = 0;
+    std::unique_ptr<Shader> m_previewShader;
+    std::shared_ptr<Mesh3D> m_previewSphereMesh;
+    float m_previewRotX = 0.35f;
+    float m_previewRotY = 0.5f;
+
+    void initMaterialPreview();
+    void renderMaterialPreviewSphere(const Material& mat);
 
     // Search filter in hierarchy
     char m_searchBuf[128] = "";

@@ -6,6 +6,7 @@
 class Shader {
 public:
     Shader(const char* vertexSrc, const char* fragmentSrc);
+    Shader(const char* vertexSrc, const char* fragmentSrc, const char* geometrySrc);
     Shader(const char* computeSrc);
     ~Shader();
 

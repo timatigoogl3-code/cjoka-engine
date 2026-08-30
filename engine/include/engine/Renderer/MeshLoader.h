@@ -13,5 +13,6 @@ public:
     // Генерация примитивов уже в Mesh3D, но дублируем для удобства
     static std::shared_ptr<Mesh3D> Cube(float size = 1.0f);
     static std::shared_ptr<Mesh3D> Quad(float size = 1.0f);
+    static std::shared_ptr<Mesh3D> Plane(float width = 10.0f, float depth = 10.0f, int gridX = 10, int gridZ = 10, float uvTileX = 1.0f, float uvTileZ = 1.0f);
     static std::shared_ptr<Mesh3D> Sphere(float radius = 0.5f, int sectors = 32, int stacks = 16);
 };

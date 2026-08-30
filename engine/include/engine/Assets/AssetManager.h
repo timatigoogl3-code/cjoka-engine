@@ -18,6 +18,7 @@ std::shared_ptr<Mesh3D> Mesh(const std::string& path);
 std::shared_ptr<Animation::SkinnedMesh> Skinned(const std::string& path);
 std::shared_ptr<Mesh3D> Cube(float size = 1.0f);
 std::shared_ptr<Mesh3D> Quad(float size = 1.0f);
+std::shared_ptr<Mesh3D> Plane(float width = 10.0f, float depth = 10.0f, int gridX = 10, int gridZ = 10, float uvTileX = 1.0f, float uvTileZ = 1.0f);
 std::shared_ptr<Mesh3D> Sphere(float r = 0.5f, int seg = 32, int rings = 16);
 
 void Clear(); // очистить кэш

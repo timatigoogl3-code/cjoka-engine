@@ -1,19 +1,13 @@
 {
-  "name": "Dark Obsidian Marble",
-  "albedo": [
-    0.08,
-    0.09,
-    0.12
-  ],
+  "name": "DarkMarble.mat",
+  "albedo": [0.08, 0.09, 0.12],
   "metallic": 0.1,
   "roughness": 0.15,
-  "ao": 1.0,
-  "emissive": [
-    0.0,
-    0.0,
-    0.0
-  ],
+  "ao": 1,
+  "normalStrength": 1.6,
+  "uvTiling": [1, 1],
+  "emissive": [0, 0, 0],
   "diffuseMap": "",
-  "normalMap": "",
+  "normalMap": "assets/textures/pbr/subtle_marble_normal.png",
   "specularMap": ""
 }

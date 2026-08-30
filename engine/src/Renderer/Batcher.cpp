@@ -67,8 +67,8 @@ void Batcher::flush(Registry& reg, const glm::mat4& view, const glm::mat4& proj,
     // тени CSM
     instanced->setBool("uHasShadow", shadow && shadow->ready());
     if (shadow && shadow->ready()) {
-        shadow->bind(2);
-        instanced->setInt("uShadowMapArray", 2);
+        shadow->bind(3);
+        instanced->setInt("uShadowMapArray", 3);
         const auto& splits = shadow->cascadeSplits();
         const auto& matrices = shadow->lightMatrices();
         for (int i = 0; i < 3; ++i) {

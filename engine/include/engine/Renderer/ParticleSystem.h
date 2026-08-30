@@ -144,7 +144,7 @@ public:
         // Обновляем VBO
         if (aliveCount > 0 && m_vbo) {
             glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, aliveCount * sizeof(ParticleVertex), m_gpuData.data());
+            glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(aliveCount * sizeof(ParticleVertex)), m_gpuData.data());
             glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
     }
@@ -168,6 +168,7 @@ public:
 
         glDepthMask(GL_TRUE);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDisable(GL_BLEND);
     }
 
     size_t count() const { return m_particles.size(); }
@@ -215,7 +216,7 @@ void main(){
 
         glBindVertexArray(m_vao);
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, m_maxParticles * sizeof(ParticleVertex), nullptr, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_maxParticles * sizeof(ParticleVertex)), nullptr, GL_DYNAMIC_DRAW);
 
         // Position: location 0
         glEnableVertexAttribArray(0);

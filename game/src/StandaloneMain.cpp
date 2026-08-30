@@ -8,6 +8,7 @@
 #include "engine/Physics/Physics.h"
 #include "engine/Audio/AudioEngine.h"
 #include "GameScripts.h"
+#include "Environment/WeatherController.h"
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -83,8 +84,10 @@ public:
         std::string specularPath = "";
         std::string texturePath = "";
         glm::vec3 albedo{1.0f};
-        float metallic = 0.0f, roughness = 0.5f, ao = 1.0f;
+        float metallic = 0.0f, roughness = 0.5f, wetness = 0.0f, ao = 1.0f;
         glm::vec3 emissive{0.0f};
+        float normalStrength = 1.0f;
+        glm::vec2 uvTiling{1.0f, 1.0f};
         bool clusterLOD = false, castShadow = true;
         bool hasLight = false;
         glm::vec3 lightCol{1.0f};
@@ -96,13 +99,22 @@ public:
         std::string scriptName = "";
         bool hasCC = false;
         float ccRadius = 0.4f, ccHeight = 1.8f, ccSpeed = 8.0f, ccJump = 5.0f;
-
         bool hasCol = false;
         int colType = 0;
         glm::vec3 colHalfExtents{0.5f};
         float colRadius = 0.5f;
         float colHeight = 1.0f;
         glm::vec3 colOffset{0.0f};
+
+        bool hasTrigger = false;
+        int triggerShape = 0;
+        glm::vec3 triggerHalfExtents{1.0f};
+        float triggerRadius = 1.0f;
+        glm::vec3 triggerOffset{0.0f};
+        std::string triggerEnterEvent = "OnTriggerEnter";
+        std::string triggerExitEvent = "OnTriggerExit";
+        bool triggerOneShot = false;
+
         std::string parentName = "";
         std::vector<std::pair<Entity, std::string>> pendingParents;
 
@@ -117,6 +129,8 @@ public:
                 else if (l.find("\"roughness\":") != std::string::npos) sscanf(l.c_str(), "%*[^:]: %f", &outMat.roughness);
                 else if (l.find("\"ao\":") != std::string::npos) sscanf(l.c_str(), "%*[^:]: %f", &outMat.ao);
                 else if (l.find("\"emissive\":") != std::string::npos) sscanf(l.c_str(), "%*[^[][%f, %f, %f", &outMat.emissive.r, &outMat.emissive.g, &outMat.emissive.b);
+                else if (l.find("\"normalStrength\":") != std::string::npos) sscanf(l.c_str(), "%*[^:]: %f", &outMat.normalStrength);
+                else if (l.find("\"uvTiling\":") != std::string::npos) sscanf(l.c_str(), "%*[^[][%f, %f", &outMat.uvTiling.x, &outMat.uvTiling.y);
                 else if (l.find("\"diffuseMap\":") != std::string::npos || l.find("\"diffusePath\":") != std::string::npos) {
                     size_t s = l.find("\"", l.find(":") + 1) + 1;
                     size_t e = l.find("\"", s);
@@ -158,7 +172,8 @@ public:
                 ref.add<Camera>(Camera{camFovVal, camNearVal, camFarVal, camPrimaryVal, camPerspVal, 10.0f});
             }
 
-            if (hasMesh || !assetPath.empty()) {
+            bool hasValidMesh = !assetPath.empty() && assetPath != "primitive:sphere";
+            if (hasValidMesh || (!hasLight && hasMesh && !assetPath.empty())) {
                 Material mat;
                 if (!materialPath.empty() && std::filesystem::exists(materialPath)) {
                     loadMat(materialPath, mat);
@@ -166,8 +181,11 @@ public:
                     mat.albedo = albedo;
                     mat.metallic = metallic;
                     mat.roughness = roughness;
+                    mat.wetness = wetness;
                     mat.ao = ao;
                     mat.emissive = emissive;
+                    mat.normalStrength = normalStrength;
+                    mat.uvTiling = uvTiling;
                 }
                 if (!diffusePath.empty()) {
                     mat.diffuseMapPath = diffusePath;
@@ -194,6 +212,8 @@ public:
                     mesh = Assets::Mesh(assetPath);
                 } else if (assetPath.find("sphere") != std::string::npos) {
                     mesh = Assets::Sphere(0.5f);
+                } else if (assetPath.find("plane") != std::string::npos || assetPath.find("quad") != std::string::npos) {
+                    mesh = Assets::Plane(10.0f, 10.0f, 20, 20, 1.0f, 1.0f);
                 } else {
                     mesh = Assets::Cube(1.0f);
                 }
@@ -209,6 +229,7 @@ public:
                 MeshRenderer mr(Assets::Sphere(0.15f), orbMat);
                 mr.assetPath = "primitive:sphere";
                 mr.setClusterLOD(false);
+                mr.setCastShadow(false);
                 ref.add<MeshRenderer>(mr);
             }
 
@@ -248,6 +269,17 @@ public:
                 col.centerOffset = colOffset;
             }
 
+            if (hasTrigger) {
+                auto& tz = ref.add<TriggerZone>();
+                tz.shape = (TriggerShape)triggerShape;
+                tz.halfExtents = triggerHalfExtents;
+                tz.radius = triggerRadius;
+                tz.offset = triggerOffset;
+                tz.enterEvent = triggerEnterEvent;
+                tz.exitEvent = triggerExitEvent;
+                tz.oneShot = triggerOneShot;
+            }
+
             if (!parentName.empty()) {
                 pendingParents.push_back({e, parentName});
             }
@@ -264,8 +296,11 @@ public:
             albedo = {1.0f, 1.0f, 1.0f};
             metallic = 0.0f;
             roughness = 0.5f;
+            wetness = 0.0f;
             ao = 1.0f;
             emissive = {0.0f, 0.0f, 0.0f};
+            normalStrength = 1.0f;
+            uvTiling = {1.0f, 1.0f};
             hasLight = false;
             hasCamera = false;
             camFovVal = 65.0f;
@@ -286,6 +321,14 @@ public:
             colRadius = 0.5f;
             colHeight = 1.0f;
             colOffset = glm::vec3(0.0f);
+            hasTrigger = false;
+            triggerShape = 0;
+            triggerHalfExtents = glm::vec3(1.0f);
+            triggerRadius = 1.0f;
+            triggerOffset = glm::vec3(0.0f);
+            triggerEnterEvent = "OnTriggerEnter";
+            triggerExitEvent = "OnTriggerExit";
+            triggerOneShot = false;
             parentName = "";
         };
 
@@ -333,10 +376,31 @@ public:
             } else if (inPost) {
                 if (auto v = registry().view<PostProcessSettings>(); v.begin() != v.end()) {
                     auto& pp = registry().get<PostProcessSettings>(*v.begin());
-                    if (line.find("\"bloomThreshold\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomThreshold);
+                    if (line.find("\"hdr\":") != std::string::npos) pp.hdr = (line.find("true") != std::string::npos);
+                    else if (line.find("\"bloom\":") != std::string::npos) pp.bloom = (line.find("true") != std::string::npos);
+                    else if (line.find("\"bloomThreshold\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomThreshold);
                     else if (line.find("\"bloomIntensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.bloomIntensity);
+                    else if (line.find("\"bloomBlurPasses\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %d", &pp.bloomBlurPasses);
+                    else if (line.find("\"fxaa\":") != std::string::npos) pp.fxaa = (line.find("true") != std::string::npos);
+                    else if (line.find("\"taa\":") != std::string::npos) pp.taa = (line.find("true") != std::string::npos);
                     else if (line.find("\"exposure\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.exposure);
+                    else if (line.find("\"gamma\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.gamma);
                     else if (line.find("\"vignette\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.vignette);
+                    else if (line.find("\"saturation\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.saturation);
+                    else if (line.find("\"gtao\":") != std::string::npos) pp.gtao = (line.find("true") != std::string::npos);
+                    else if (line.find("\"gtaoRadius\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.gtaoRadius);
+                    else if (line.find("\"gtaoIntensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.gtaoIntensity);
+                    else if (line.find("\"volumetricFog\":") != std::string::npos) pp.volumetricFog = (line.find("true") != std::string::npos);
+                    else if (line.find("\"fogDensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.fogDensity);
+                    else if (line.find("\"fogHeightFalloff\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.fogHeightFalloff);
+                    else if (line.find("\"fogHeight\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.fogHeight);
+                    else if (line.find("\"fogStart\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.fogStart);
+                    else if (line.find("\"fogEnd\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.fogEnd);
+                    else if (line.find("\"lightShafts\":") != std::string::npos) pp.lightShafts = (line.find("true") != std::string::npos);
+                    else if (line.find("\"shaftDensity\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.shaftDensity);
+                    else if (line.find("\"shaftWeight\":") != std::string::npos) sscanf(line.c_str(), "%*[^:]: %f", &pp.shaftWeight);
+                    else if (line.find("\"ssr\":") != std::string::npos) pp.ssr = (line.find("true") != std::string::npos);
+                    else if (line.find("\"vxgi\":") != std::string::npos) pp.vxgi = (line.find("true") != std::string::npos);
                 }
                 continue;
             }
@@ -398,10 +462,16 @@ public:
                 sscanf(line.c_str(), "%*[^:]: %f", &metallic);
             } else if (line.find("\"roughness\":") != std::string::npos) {
                 sscanf(line.c_str(), "%*[^:]: %f", &roughness);
+            } else if (line.find("\"wetness\":") != std::string::npos) {
+                sscanf(line.c_str(), "%*[^:]: %f", &wetness);
             } else if (line.find("\"ao\":") != std::string::npos) {
                 sscanf(line.c_str(), "%*[^:]: %f", &ao);
             } else if (line.find("\"emissive\":") != std::string::npos) {
                 sscanf(line.c_str(), "%*[^[][%f, %f, %f", &emissive.r, &emissive.g, &emissive.b);
+            } else if (line.find("\"normalStrength\":") != std::string::npos) {
+                sscanf(line.c_str(), "%*[^:]: %f", &normalStrength);
+            } else if (line.find("\"uvTiling\":") != std::string::npos) {
+                sscanf(line.c_str(), "%*[^[][%f, %f", &uvTiling.x, &uvTiling.y);
             } else if (line.find("\"clusterLOD\":") != std::string::npos) {
                 clusterLOD = (line.find("true") != std::string::npos);
             } else if (line.find("\"castShadow\":") != std::string::npos) {
@@ -436,6 +506,26 @@ public:
                 sscanf(line.c_str(), "%*[^:]: %f", &colHeight);
             } else if (line.find("\"offset\":") != std::string::npos && hasCol) {
                 sscanf(line.c_str(), "%*[^[][%f, %f, %f", &colOffset.x, &colOffset.y, &colOffset.z);
+            } else if (line.find("\"triggerZone\":") != std::string::npos) {
+                hasTrigger = true;
+            } else if (line.find("\"shape\":") != std::string::npos && hasTrigger) {
+                sscanf(line.c_str(), "%*[^:]: %d", &triggerShape);
+            } else if (line.find("\"halfExtents\":") != std::string::npos && hasTrigger) {
+                sscanf(line.c_str(), "%*[^[][%f, %f, %f", &triggerHalfExtents.x, &triggerHalfExtents.y, &triggerHalfExtents.z);
+            } else if (line.find("\"radius\":") != std::string::npos && hasTrigger) {
+                sscanf(line.c_str(), "%*[^:]: %f", &triggerRadius);
+            } else if (line.find("\"offset\":") != std::string::npos && hasTrigger) {
+                sscanf(line.c_str(), "%*[^[][%f, %f, %f", &triggerOffset.x, &triggerOffset.y, &triggerOffset.z);
+            } else if (line.find("\"enterEvent\":") != std::string::npos && hasTrigger) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                triggerEnterEvent = line.substr(start, end - start);
+            } else if (line.find("\"exitEvent\":") != std::string::npos && hasTrigger) {
+                size_t start = line.find("\"", line.find(":") + 1) + 1;
+                size_t end = line.find("\"", start);
+                triggerExitEvent = line.substr(start, end - start);
+            } else if (line.find("\"oneShot\":") != std::string::npos && hasTrigger) {
+                triggerOneShot = (line.find("true") != std::string::npos);
             } else if (line.find("\"parent\":") != std::string::npos) {
                 size_t start = line.find("\"", line.find(":") + 1) + 1;
                 size_t end = line.find("\"", start);
@@ -494,6 +584,9 @@ public:
             m_phys->Step(dt);
             m_phys->SyncToECS(registry());
         }
+
+        // Run Gameplay Trigger Zones
+        Systems::UpdateTriggerZones(registry());
 
         // Run Native Scripts
         for (Entity e : registry().view<NativeScript>()) {
@@ -600,8 +693,11 @@ public:
             m_pipe->setCameraMatrices(viewMatrix, projMatrix);
         }
 
+        game::WeatherController::Get().update(dt, registry(), viewPos);
+
         m_pipe->beginFrame();
         Systems::RenderWithCamera(registry(), *m_litShader, window(), viewMatrix, projMatrix, viewPos, m_pipe->prevViewProj());
+        game::WeatherController::Get().renderVFX(viewMatrix, projMatrix, viewPos);
         m_pipe->endFrame();
     }
 

@@ -16,10 +16,9 @@ namespace {
 int s_drawnClusters = 0;
 
 inline uint64_t posHash(const glm::vec3& p) {
-    uint32_t x, y, z;
-    std::memcpy(&x, &p.x, 4);
-    std::memcpy(&y, &p.y, 4);
-    std::memcpy(&z, &p.z, 4);
+    int64_t x = static_cast<int64_t>(std::round(p.x * 2048.0f));
+    int64_t y = static_cast<int64_t>(std::round(p.y * 2048.0f));
+    int64_t z = static_cast<int64_t>(std::round(p.z * 2048.0f));
     return (uint64_t(x) * 73856093u) ^ (uint64_t(y) * 19349663u) ^ (uint64_t(z) * 83492791u);
 }
 
@@ -219,28 +218,34 @@ struct Quadric4x4 {
 };
 
 static bool SolveOptimal(const Quadric4x4& q, glm::vec3& out) {
-    float a00=q.m[0], a01=q.m[1], a02=q.m[2], b0=q.m[3];
-    float a11=q.m[4], a12=q.m[5], b1=q.m[6];
-    float a22=q.m[7], b2=q.m[8];
-    float det = a00*(a11*a22-a12*a12) - a01*(a01*a22-a12*b2) + a02*(a01*a12-a11*b2);
-    if (std::abs(det) < 1e-10f) return false;
-    float inv = 1.0f / det;
-    out.x = -((a11*a22-a12*a12)*b0 - (a01*a22-a12*b2)*b1 + (a01*a12-a11*b2)*b2) * inv;
-    out.y = -((a02*a12-a01*a22)*b0 + (a00*a22-a02*a02)*b1 - (a00*a12-a01*a02)*b2) * inv;
-    out.z = -((a01*a12-a02*a11)*b0 - (a00*a12-a02*a01)*b1 + (a00*a11-a01*a01)*b2) * inv;
-    return true;
+    glm::mat3 A(
+        q.m[0], q.m[1], q.m[2],
+        q.m[1], q.m[4], q.m[5],
+        q.m[2], q.m[5], q.m[7]
+    );
+    float det = glm::determinant(A);
+    if (std::abs(det) < 1e-7f) return false;
+    glm::vec3 b(q.m[3], q.m[6], q.m[8]);
+    out = -glm::inverse(A) * b;
+    return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
 static void SimplifyQuadric(const std::vector<Vertex>& inV, const std::vector<uint32_t>& inI,
                             float targetRatio, std::vector<Vertex>& outV, std::vector<uint32_t>& outI,
                             std::vector<uint32_t>& surviveCount,
-                            const std::unordered_set<uint64_t>* locked) {
+                            const std::unordered_set<uint64_t>* locked,
+                            float* outMaxError = nullptr) {
     outV.clear();
     outI.clear();
     surviveCount.clear();
 
     const size_t nVert = inV.size();
     const size_t nTri = inI.size() / 3;
+    if (nVert < 4 || nTri < 2) {
+        outV = inV; outI = inI;
+        surviveCount.resize(nTri, 1);
+        return;
+    }
     const size_t targetTri = std::max<size_t>(static_cast<size_t>(nTri * targetRatio), 1);
     if (nTri <= targetTri) {
         outV = inV; outI = inI;
@@ -249,155 +254,263 @@ static void SimplifyQuadric(const std::vector<Vertex>& inV, const std::vector<ui
         return;
     }
 
-    // Mark locked vertices
+    std::vector<glm::vec3> pos(nVert);
+    std::vector<glm::vec2> uvs(nVert);
+    for (size_t i = 0; i < nVert; ++i) {
+        pos[i] = inV[i].position;
+        uvs[i] = inV[i].texCoord;
+    }
+
+    // Per-vertex quadrics and adjacency
+    std::vector<Quadric4x4> Q(nVert);
+    std::vector<std::vector<uint32_t>> vertTris(nVert);
+    struct Triangle {
+        uint32_t v[3];
+        glm::vec3 origNormal;
+        bool alive = true;
+    };
+    std::vector<Triangle> tris(nTri);
+
+    std::unordered_map<uint64_t, int> edgeFaceCount;
+    auto makeEdge = [](uint32_t a, uint32_t b) {
+        return (uint64_t(std::min(a, b)) << 32) | std::max(a, b);
+    };
+
+    for (size_t t = 0; t < nTri; ++t) {
+        uint32_t a = inI[t * 3], b = inI[t * 3 + 1], c = inI[t * 3 + 2];
+        tris[t].v[0] = a;
+        tris[t].v[1] = b;
+        tris[t].v[2] = c;
+        vertTris[a].push_back(static_cast<uint32_t>(t));
+        vertTris[b].push_back(static_cast<uint32_t>(t));
+        vertTris[c].push_back(static_cast<uint32_t>(t));
+
+        edgeFaceCount[makeEdge(a, b)]++;
+        edgeFaceCount[makeEdge(b, c)]++;
+        edgeFaceCount[makeEdge(c, a)]++;
+
+        glm::vec3 n = glm::cross(pos[b] - pos[a], pos[c] - pos[a]);
+        float area = glm::length(n);
+        if (area > 1e-9f) n /= area; else n = glm::vec3(0, 1, 0);
+        tris[t].origNormal = n;
+
+        float d = -glm::dot(n, pos[a]);
+        auto fq = Quadric4x4::FromPlane(n.x, n.y, n.z, d);
+        for (int i = 0; i < 10; ++i) fq.m[i] *= std::max(area, 1e-4f);
+        Q[a] = Q[a] + fq;
+        Q[b] = Q[b] + fq;
+        Q[c] = Q[c] + fq;
+    }
+
+    // Garland-Heckbert boundary preservation quadrics (prevents leaves/thin surfaces from shrinking)
+    for (size_t t = 0; t < nTri; ++t) {
+        uint32_t v[3] = { tris[t].v[0], tris[t].v[1], tris[t].v[2] };
+        for (int j = 0; j < 3; ++j) {
+            uint32_t a = v[j], b = v[(j + 1) % 3];
+            if (edgeFaceCount[makeEdge(a, b)] == 1) {
+                glm::vec3 edgeVec = pos[b] - pos[a];
+                float elen = glm::length(edgeVec);
+                if (elen > 1e-6f) {
+                    edgeVec /= elen;
+                    glm::vec3 bNormal = glm::normalize(glm::cross(tris[t].origNormal, edgeVec));
+                    float bd = -glm::dot(bNormal, pos[a]);
+                    auto bq = Quadric4x4::FromPlane(bNormal.x, bNormal.y, bNormal.z, bd);
+                    for (int k = 0; k < 10; ++k) bq.m[k] *= (elen * 50.0f);
+                    Q[a] = Q[a] + bq;
+                    Q[b] = Q[b] + bq;
+                }
+            }
+        }
+    }
+
+    // Locked boundary vertices
     std::vector<bool> vertLocked(nVert, false);
     if (locked) {
         for (size_t i = 0; i < nVert; ++i)
             if (locked->count(posHash(inV[i].position))) vertLocked[i] = true;
     }
 
-    // Per-vertex quadrics and live positions (updated on collapse)
-    std::vector<Quadric4x4> Q(nVert);
-    std::vector<glm::vec3> pos(nVert);
-    for (size_t i = 0; i < nVert; ++i) pos[i] = inV[i].position;
-
-    // Build face quadrics + edge adjacency
-    std::unordered_map<uint64_t, std::vector<uint32_t>> edgeTris;
-    edgeTris.reserve(nTri * 3);
-    for (uint32_t t = 0; t < nTri; ++t) {
-        uint32_t a=inI[t*3], b=inI[t*3+1], c=inI[t*3+2];
-        glm::vec3 n = glm::cross(pos[b]-pos[a], pos[c]-pos[a]);
-        float area = glm::length(n);
-        if (area < 1e-10f) continue;
-        n /= area;
-        float d = -glm::dot(n, pos[a]);
-        auto fq = Quadric4x4::FromPlane(n.x,n.y,n.z,d);
-        // Weight by area
-        for (int i=0;i<10;++i) fq.m[i] *= area;
-        Q[a]=Q[a]+fq; Q[b]=Q[b]+fq; Q[c]=Q[c]+fq;
-
-        auto addE=[&](uint32_t u,uint32_t v){
-            uint64_t k=(uint64_t(std::min(u,v))<<32)|std::max(u,v);
-            edgeTris[k].push_back(t);
-        };
-        addE(a,b); addE(b,c); addE(c,a);
-    }
-
-    // Edge cost computation
-    struct Edge { uint32_t v0,v1; float cost; };
-    auto computeCost=[&](uint32_t v0,uint32_t v1)->float{
-        Quadric4x4 eq = Q[v0]+Q[v1];
-        glm::vec3 opt;
-        float cost;
-        if (SolveOptimal(eq,opt) && std::isfinite(opt.x)) {
-            cost = eq.Evaluate(opt);
-        } else {
-            float e0=Q[v0].Evaluate(pos[v0]), e1=Q[v1].Evaluate(pos[v1]);
-            cost = std::min(e0,e1);
-        }
-        return cost < 0 ? 0 : cost;
-    };
-
-    auto edgeLess=[](const Edge& a,const Edge& b){return a.cost>b.cost;};
-    std::vector<Edge> heap;
-    heap.reserve(edgeTris.size());
-    for (auto& [key,tris] : edgeTris) {
-        if (tris.size()<2) continue;
-        uint32_t v0=uint32_t(key>>32), v1=uint32_t(key&0xFFFFFFFF);
-        if (vertLocked[v0]||vertLocked[v1]) continue;
-        heap.push_back({v0,v1,computeCost(v0,v1)});
-    }
-    std::make_heap(heap.begin(),heap.end(),edgeLess);
-
-    // Union-Find
+    // Union-find
     std::vector<uint32_t> uf(nVert);
-    for (uint32_t i=0;i<nVert;++i) uf[i]=i;
-    auto find=[&](uint32_t x)->uint32_t{
-        while(uf[x]!=x){uf[x]=uf[uf[x]];x=uf[x];} return x;
+    for (size_t i = 0; i < nVert; ++i) uf[i] = static_cast<uint32_t>(i);
+    auto find = [&](uint32_t x) -> uint32_t {
+        while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; }
+        return x;
     };
 
-    std::vector<bool> alive(nVert,true);
-    std::vector<bool> triAlive(nTri,true);
-    size_t curTriCount=nTri;
+    struct Edge {
+        uint32_t u, v;
+        glm::vec3 optPos;
+        float cost;
+    };
 
-    // Collapse loop
-    while (curTriCount>targetTri && !heap.empty()) {
-        Edge e=heap.front();
-        std::pop_heap(heap.begin(),heap.end(),edgeLess);
+    auto evalEdge = [&](uint32_t u, uint32_t v, Edge& outEdge) -> bool {
+        u = find(u); v = find(v);
+        if (u == v) return false;
+        if (vertLocked[u] && vertLocked[v]) return false;
+
+        Quadric4x4 q = Q[u] + Q[v];
+        glm::vec3 mid = (pos[u] + pos[v]) * 0.5f;
+        float edgeLen = glm::distance(pos[u], pos[v]);
+
+        glm::vec3 cand[4] = { mid, pos[u], pos[v], mid };
+        int candCount = 3;
+        glm::vec3 opt;
+        if (SolveOptimal(q, opt) && std::isfinite(opt.x) && glm::distance(opt, mid) <= edgeLen * 1.5f) {
+            cand[3] = opt;
+            candCount = 4;
+        }
+
+        float bestCost = 1e30f;
+        glm::vec3 bestP = mid;
+
+        for (int k = 0; k < candCount; ++k) {
+            const glm::vec3& p = cand[k];
+            bool flips = false;
+            auto checkFlip = [&](uint32_t vertIdx) {
+                for (uint32_t tIdx : vertTris[vertIdx]) {
+                    const auto& tri = tris[tIdx];
+                    if (!tri.alive) continue;
+                    uint32_t a = find(tri.v[0]), b = find(tri.v[1]), c = find(tri.v[2]);
+                    if ((a == u && b == v) || (b == u && c == v) || (c == u && a == v) ||
+                        (a == v && b == u) || (b == v && c == u) || (c == v && a == u)) continue;
+                    glm::vec3 pa = (a == vertIdx) ? p : pos[a];
+                    glm::vec3 pb = (b == vertIdx) ? p : pos[b];
+                    glm::vec3 pc = (c == vertIdx) ? p : pos[c];
+                    glm::vec3 newN = glm::cross(pb - pa, pc - pa);
+                    float len = glm::length(newN);
+                    if (len < 1e-10f || glm::dot(newN / len, tri.origNormal) < 0.2f) {
+                        flips = true;
+                        return;
+                    }
+                }
+            };
+            checkFlip(u);
+            if (!flips) checkFlip(v);
+            if (flips) continue;
+
+            float c = q.Evaluate(p);
+            if (c < bestCost) {
+                bestCost = c;
+                bestP = p;
+            }
+        }
+
+        if (bestCost >= 1e29f) return false;
+        outEdge = { u, v, bestP, bestCost };
+        return true;
+    };
+
+    auto edgeLess = [](const Edge& a, const Edge& b) { return a.cost > b.cost; };
+    std::vector<Edge> heap;
+    heap.reserve(nTri * 2);
+
+    for (size_t t = 0; t < nTri; ++t) {
+        uint32_t v0 = tris[t].v[0], v1 = tris[t].v[1], v2 = tris[t].v[2];
+        Edge ed;
+        if (v0 < v1 && evalEdge(v0, v1, ed)) heap.push_back(ed);
+        if (v1 < v2 && evalEdge(v1, v2, ed)) heap.push_back(ed);
+        if (v2 < v0 && evalEdge(v2, v0, ed)) heap.push_back(ed);
+    }
+    std::make_heap(heap.begin(), heap.end(), edgeLess);
+
+    std::vector<bool> alive(nVert, true);
+    size_t curTriCount = nTri;
+    float maxDisp = 0.0f;
+
+    while (curTriCount > targetTri && !heap.empty()) {
+        Edge ed = heap.front();
+        std::pop_heap(heap.begin(), heap.end(), edgeLess);
         heap.pop_back();
 
-        uint32_t u=find(e.v0), v=find(e.v1);
-        if (u==v || !alive[u] || !alive[v]) continue;
+        uint32_t u = find(ed.u), v = find(ed.v);
+        if (u == v || !alive[u] || !alive[v]) continue;
+        if (vertLocked[u] && vertLocked[v]) continue;
 
-        // Merge v → u
-        alive[v]=false;
-        uf[v]=u;
-        Q[u]=Q[u]+Q[v];
+        if (vertLocked[v]) std::swap(u, v);
 
-        // Optimal position for merged vertex
-        Quadric4x4 eq=Q[u];
-        glm::vec3 opt;
-        if (SolveOptimal(eq,opt) && std::isfinite(opt.x)) {
-            pos[u]=opt;
-        }
-        // else keep pos[u] as is
+        float d0 = glm::distance(ed.optPos, pos[u]);
+        float d1 = glm::distance(ed.optPos, pos[v]);
+        maxDisp = std::max(maxDisp, std::max(d0, d1));
 
-        // Fix triangles: redirect v→u, remove degenerates
-        std::vector<uint64_t> affectedEdges;
-        for (uint32_t t=0;t<nTri && curTriCount>targetTri;++t) {
-            if (!triAlive[t]) continue;
-            uint32_t ra=find(inI[t*3]), rb=find(inI[t*3+1]), rc=find(inI[t*3+2]);
-            if (ra==rb || rb==rc || ra==rc) {
-                triAlive[t]=false; --curTriCount; continue;
+        alive[v] = false;
+        uf[v] = u;
+        pos[u] = ed.optPos;
+        uvs[u] = (uvs[u] + uvs[v]) * 0.5f;
+        Q[u] = Q[u] + Q[v];
+
+        for (uint32_t tIdx : vertTris[v]) {
+            auto& tri = tris[tIdx];
+            if (!tri.alive) continue;
+            for (int k = 0; k < 3; ++k) {
+                if (tri.v[k] == v) tri.v[k] = u;
             }
-            // Record affected edges
-            auto rec=[&](uint32_t x,uint32_t y){
-                if(x!=y) affectedEdges.push_back((uint64_t(std::min(x,y))<<32)|std::max(x,y));
-            };
-            rec(ra,rb); rec(rb,rc); rec(ra,rc);
+            uint32_t a = find(tri.v[0]), b = find(tri.v[1]), c = find(tri.v[2]);
+            if (a == b || b == c || a == c) {
+                tri.alive = false;
+                --curTriCount;
+            } else {
+                vertTris[u].push_back(tIdx);
+            }
         }
+        vertTris[v].clear();
 
-        // Re-evaluate affected edges
-        std::sort(affectedEdges.begin(),affectedEdges.end());
-        affectedEdges.erase(std::unique(affectedEdges.begin(),affectedEdges.end()),affectedEdges.end());
-        for (uint64_t ek : affectedEdges) {
-            uint32_t eu=find(uint32_t(ek>>32)), ev=find(uint32_t(ek&0xFFFFFFFF));
-            if(eu==ev||!alive[eu]||!alive[ev]) continue;
-            if(vertLocked[eu]||vertLocked[ev]) continue;
-            heap.push_back({eu,ev,computeCost(eu,ev)});
-            std::push_heap(heap.begin(),heap.end(),edgeLess);
+        for (uint32_t tIdx : vertTris[u]) {
+            const auto& tri = tris[tIdx];
+            if (!tri.alive) continue;
+            for (int k = 0; k < 3; ++k) {
+                uint32_t nbr = find(tri.v[k]);
+                if (nbr != u) {
+                    Edge newEd;
+                    if (evalEdge(u, nbr, newEd)) {
+                        heap.push_back(newEd);
+                        std::push_heap(heap.begin(), heap.end(), edgeLess);
+                    }
+                }
+            }
         }
     }
 
-    // Collect surviving vertices
     std::vector<uint32_t> newIdx(nVert, UINT32_MAX);
     outV.clear();
-    for (uint32_t i=0;i<nVert;++i) {
-        uint32_t root=find(i);
-        if (root==i && alive[i]) {
-            newIdx[i]=static_cast<uint32_t>(outV.size());
-            Vertex v=inV[i];
-            v.position=pos[i];
+    for (size_t i = 0; i < nVert; ++i) {
+        uint32_t root = find(static_cast<uint32_t>(i));
+        if (root == i && alive[i]) {
+            newIdx[i] = static_cast<uint32_t>(outV.size());
+            Vertex v = inV[i];
+            v.position = pos[i];
+            v.texCoord = uvs[i];
             outV.push_back(v);
         }
     }
 
-    // Remap index buffer
-    for (uint32_t t=0;t<nTri;++t) {
-        if (!triAlive[t]) continue;
-        uint32_t a=find(inI[t*3]), b=find(inI[t*3+1]), c=find(inI[t*3+2]);
-        if (a==b||b==c||a==c) continue;
-        if (newIdx[a]==UINT32_MAX||newIdx[b]==UINT32_MAX||newIdx[c]==UINT32_MAX) continue;
-        outI.push_back(newIdx[a]); outI.push_back(newIdx[b]); outI.push_back(newIdx[c]);
+    outI.reserve(curTriCount * 3);
+    for (size_t t = 0; t < nTri; ++t) {
+        if (!tris[t].alive) continue;
+        uint32_t a = newIdx[find(tris[t].v[0])];
+        uint32_t b = newIdx[find(tris[t].v[1])];
+        uint32_t c = newIdx[find(tris[t].v[2])];
+        if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX) continue;
+        if (a == b || b == c || a == c) continue;
+        outI.push_back(a);
+        outI.push_back(b);
+        outI.push_back(c);
     }
 
-    // Build surviveCount
-    surviveCount.resize(nTri);
-    uint32_t acc=0;
-    for (size_t t=0;t<nTri;++t) {
-        if(triAlive[t]) ++acc;
-        surviveCount[t]=acc;
+    for (auto& v : outV) v.normal = glm::vec3(0.0f);
+    for (size_t i = 0; i < outI.size(); i += 3) {
+        uint32_t a = outI[i], b = outI[i + 1], c = outI[i + 2];
+        glm::vec3 fn = glm::cross(outV[b].position - outV[a].position, outV[c].position - outV[a].position);
+        outV[a].normal += fn;
+        outV[b].normal += fn;
+        outV[c].normal += fn;
     }
+    for (auto& v : outV) {
+        float len = glm::length(v.normal);
+        if (len > 1e-6f) v.normal /= len; else v.normal = glm::vec3(0, 1, 0);
+    }
+    if (outMaxError) *outMaxError = maxDisp;
+    surviveCount.resize(nTri, static_cast<uint32_t>(outI.size() / 3));
 }
 
 static void MortonReorder(std::vector<uint32_t>& idx, std::vector<Vertex>& verts,
@@ -441,7 +554,7 @@ void ClusteredMesh::Build(const std::vector<Vertex>& verts, const std::vector<ui
     m_boundCenter = (bmin + bmax) * 0.5f;
     m_boundRadius = glm::length(bmax - bmin) * 0.5f;
     float maxDim = std::max({ bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z });
-    m_baseCell = maxDim * 0.0015f;
+    m_baseCell = maxDim * 0.0004f;
 
     std::vector<Vertex> curV = verts;
     std::vector<uint32_t> curI = idx;
@@ -460,21 +573,22 @@ void ClusteredMesh::Build(const std::vector<Vertex>& verts, const std::vector<ui
         std::vector<Vertex> nxtV;
         std::vector<uint32_t> nxtI;
         std::vector<uint32_t> survive;
+        float lodErr = 0.0f;
 
-        // Recompute locked vertices for THIS level's cluster topology
-        auto lockedSet = ComputeLockedVertices(curV, curI, clusterTris);
         if (cluster_lod::useQuadric) {
-            // QEM: target 50% reduction per level (preserves thin features)
-            SimplifyQuadric(curV, curI, 0.5f, nxtV, nxtI, survive, &lockedSet);
+            // QEM with boundary preservation: target 50% reduction per level
+            SimplifyQuadric(curV, curI, 0.5f, nxtV, nxtI, survive, nullptr, &lodErr);
         } else {
+            auto lockedSet = ComputeLockedVertices(curV, curI, clusterTris);
             SimplifyVertexCluster(curV, curI, cell, nxtV, nxtI, survive, &lockedSet);
+            lodErr = cell;
         }
 
         if (nxtI.empty()) break;
         MortonReorder(nxtI, nxtV, bmin, bmax);
         lodVerts.push_back(nxtV);
         lodIdx.push_back(nxtI);
-        lodErrors.push_back(cell);
+        lodErrors.push_back(std::max(lodErr, lodErrors.back() * 1.5f + 0.02f));
 
         curV = std::move(nxtV);
         curI = std::move(nxtI);
@@ -705,10 +819,10 @@ int ClusteredMesh::DrawInstancedShadow(const glm::mat4* models, int count,
                                        const glm::vec3& lightEye, const glm::mat4& lightVP,
                                        float thresholdPx) const {
     // Convert model matrices to InstanceData for shadow pass (prevModel = model, no motion needed)
-    std::vector<InstanceData> shadowInstances(count);
+    std::vector<InstanceData> shadowInstances(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
-        shadowInstances[i].model = models[i];
-        shadowInstances[i].prevModel = models[i];
+        shadowInstances[static_cast<size_t>(i)].model = models[i];
+        shadowInstances[static_cast<size_t>(i)].prevModel = models[i];
     }
     return DrawInstanced(shadowInstances.data(), count, lightEye, lightVP, glm::radians(60.0f), 1024.0f, thresholdPx);
 }
@@ -723,12 +837,15 @@ int ClusteredMesh::lastDrawn() { return s_drawnClusters; }
 void ClusteredMesh::ResetStats() { s_drawnClusters = 0; }
 
 namespace Assets {
-namespace { std::unordered_map<std::string, std::weak_ptr<ClusteredMesh>> s_clusterCache; }
+namespace { 
+    std::unordered_map<std::string, std::shared_ptr<ClusteredMesh>> s_clusterCache; 
+    std::unordered_map<Mesh3D*, std::shared_ptr<ClusteredMesh>> autoCache;
+}
 
 std::shared_ptr<ClusteredMesh> Clustered(const std::string& objPath, int maxLODs) {
     auto it = s_clusterCache.find(objPath);
-    if (it != s_clusterCache.end()) {
-        if (auto sp = it->second.lock()) return sp;
+    if (it != s_clusterCache.end() && it->second) {
+        return it->second;
     }
     auto src = MeshLoader::LoadOBJ(objPath);
     auto cm = std::make_shared<ClusteredMesh>();
@@ -738,10 +855,10 @@ std::shared_ptr<ClusteredMesh> Clustered(const std::string& objPath, int maxLODs
 }
 
 std::shared_ptr<ClusteredMesh> ClusteredFrom(const std::shared_ptr<Mesh3D>& mesh) {
-    static std::unordered_map<Mesh3D*, std::weak_ptr<ClusteredMesh>> autoCache;
+    if (!mesh) return nullptr;
     auto it = autoCache.find(mesh.get());
-    if (it != autoCache.end()) {
-        if (auto sp = it->second.lock()) return sp;
+    if (it != autoCache.end() && it->second) {
+        return it->second;
     }
     auto cm = std::make_shared<ClusteredMesh>();
     cm->Build(mesh->vertices(), mesh->indices(), 3);

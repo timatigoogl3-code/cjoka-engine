@@ -31,11 +31,11 @@ void Framebuffer::create(int w,int h,bool hdr,bool withDepth,bool withVelocity){
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
     glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,m_color,0);
 
-    // Color attachment 1: Velocity RG16F (optional)
+    // Color attachment 1: NormalRoughness RGBA16F (optional)
     if(withVelocity){
         glGenTextures(1,&m_velocity);
         glBindTexture(GL_TEXTURE_2D, m_velocity);
-        glTexImage2D(GL_TEXTURE_2D,0,GL_RG16F,w,h,0,GL_RG,GL_FLOAT,nullptr);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,w,h,0,GL_RGBA,GL_FLOAT,nullptr);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);

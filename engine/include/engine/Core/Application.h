@@ -11,7 +11,10 @@ public:
     Application& operator=(const Application&) = delete;
 
     void run();
-    void close() { m_running = false; }
+    void close() {
+        std::cout << "[Engine] Application::close() called!\n";
+        m_running = false;
+    }
     bool isRunning() const { return m_running; }
 
     // Жизненный цикл приложения (переопределяется игрой)

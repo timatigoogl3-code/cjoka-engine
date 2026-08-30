@@ -272,3 +272,5 @@ public:
     }
 };
 REGISTER_SCRIPT(OrbitCameraScript, "Orbit Camera")
+
+#include "Scripts/MyPlayerScript.h"

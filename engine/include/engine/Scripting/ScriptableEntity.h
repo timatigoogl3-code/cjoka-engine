@@ -2,15 +2,23 @@
 #include "engine/ECS/Registry.h"
 #include "engine/ECS/Components.h"
 #include "engine/Core/Input.h"
+#include "engine/Core/DebugLog.h"
+#include "engine/Gameplay/EventBus.h"
+#include "engine/Gameplay/Blackboard.h"
 #include <string>
 #include <memory>
 #include <functional>
 #include <unordered_map>
+#include <vector>
 #include <typeinfo>
 
 class ScriptableEntity {
 public:
-    virtual ~ScriptableEntity() = default;
+    virtual ~ScriptableEntity() {
+        for (uint64_t subId : m_eventSubscriptions) {
+            EventBus::Get().unsubscribe(subId);
+        }
+    }
 
     template<typename T>
     T& get() { return m_registry->get<T>(m_entity); }
@@ -31,11 +39,49 @@ public:
     Registry& sceneRegistry() { return *m_registry; }
     const Registry& sceneRegistry() const { return *m_registry; }
 
+    // Editor-only debug logging
+    void log(const std::string& msg) {
+        DebugLog::LogScript(msg, "Script");
+    }
+    void logWarning(const std::string& msg) {
+        DebugLog::LogWarning(msg, "Script");
+    }
+    void logError(const std::string& msg) {
+        DebugLog::LogError(msg, "Script");
+    }
+
+    // Global & Gameplay Events
+    void emitEvent(const std::string& name, Entity target = NullEntity, std::any payload = {}) {
+        EventBus::Get().emit(name, m_entity, target, payload);
+    }
+
+    void subscribeEvent(const std::string& name, EventCallback callback) {
+        uint64_t id = EventBus::Get().subscribe(name, callback);
+        m_eventSubscriptions.push_back(id);
+    }
+
+    // World Blackboard & Quest State
+    void setFlag(const std::string& key, bool val) { Blackboard::Get().setBool(key, val); }
+    bool getFlag(const std::string& key, bool defaultVal = false) const { return Blackboard::Get().getBool(key, defaultVal); }
+
+    void setInt(const std::string& key, int val) { Blackboard::Get().setInt(key, val); }
+    int getInt(const std::string& key, int defaultVal = 0) const { return Blackboard::Get().getInt(key, defaultVal); }
+
+    void setFloat(const std::string& key, float val) { Blackboard::Get().setFloat(key, val); }
+    float getFloat(const std::string& key, float defaultVal = 0.0f) const { return Blackboard::Get().getFloat(key, defaultVal); }
+
+    void setString(const std::string& key, const std::string& val) { Blackboard::Get().setString(key, val); }
+    std::string getString(const std::string& key, const std::string& defaultVal = "") const { return Blackboard::Get().getString(key, defaultVal); }
+
     virtual void onCreate() {}
     virtual void onStart() {}
     virtual void onUpdate(float dt) { (void)dt; }
     virtual void onDestroy() {}
     virtual void onInspectorGUI() {}
+
+    virtual void onTriggerEnter(Entity visitor) { (void)visitor; }
+    virtual void onTriggerExit(Entity visitor) { (void)visitor; }
+    virtual void onEvent(const EventData& event) { (void)event; }
 
     void _init(Entity e, Registry* reg) {
         m_entity = e;
@@ -45,6 +91,7 @@ public:
 private:
     Entity m_entity = NullEntity;
     Registry* m_registry = nullptr;
+    std::vector<uint64_t> m_eventSubscriptions;
     friend class ScriptSystem;
     friend class Scene;
 };

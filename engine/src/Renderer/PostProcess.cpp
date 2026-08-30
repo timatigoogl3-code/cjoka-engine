@@ -95,6 +95,7 @@ void Blur(GLuint tex,GLuint outFBO,glm::vec2 dir){
 }
 void Composite(GLuint sceneTex,GLuint bloomTex,float bloomIntensity,float vignette,
                float exposure,float gamma,float saturation){
+    glViewport(0, 0, s_w, s_h);
     s_composite->use();
     s_composite->setInt("uScene",0);
     s_composite->setInt("uBloom",1);
@@ -111,12 +112,14 @@ void Composite(GLuint sceneTex,GLuint bloomTex,float bloomIntensity,float vignet
     glActiveTexture(GL_TEXTURE0);
 }
 void FXAA(GLuint tex){
+    glViewport(0, 0, s_w, s_h);
     s_fxaa->use();
     s_fxaa->setInt("uTex",0);
     s_fxaa->setVec2("uTexel",glm::vec2(1.0f/s_w,1.0f/s_h));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D,tex);
     DrawFullscreen();
+    glActiveTexture(GL_TEXTURE0);
 }
 
 static Shader* s_taa = nullptr;
@@ -193,6 +196,25 @@ void SSRComposite(GLuint sceneTex, GLuint ssrTex, GLuint outFBO, float intensity
 
     DrawFullscreen();
     glActiveTexture(GL_TEXTURE0);
+}
+
+static Shader* s_radialBlur = nullptr;
+
+void RadialBlur(GLuint sceneTex, GLuint outFBO, float blurStrength, float chromaticAberration, glm::vec2 center) {
+    if (!s_radialBlur) s_radialBlur = new Shader(DefaultShaders::kPostVS, DefaultShaders::kRadialSpeedBlurFS);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, outFBO);
+    glViewport(0, 0, s_w, s_h);
+    s_radialBlur->use();
+    s_radialBlur->setInt("uSceneTex", 0);
+    s_radialBlur->setVec2("uCenter", center);
+    s_radialBlur->setFloat("uBlurStrength", blurStrength);
+    s_radialBlur->setFloat("uChromaticAberration", chromaticAberration);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneTex);
+
+    DrawFullscreen();
 }
 
 } // namespace PostProcess

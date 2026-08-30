@@ -29,6 +29,25 @@ Shader::Shader(const char* vs, const char* fs) {
     glDeleteShader(f);
 }
 
+Shader::Shader(const char* vs, const char* fs, const char* gs) {
+    GLuint v = compile(GL_VERTEX_SHADER, vs);
+    GLuint f = compile(GL_FRAGMENT_SHADER, fs);
+    GLuint g = compile(GL_GEOMETRY_SHADER, gs);
+    m_id = glCreateProgram();
+    glAttachShader(m_id, v);
+    glAttachShader(m_id, f);
+    glAttachShader(m_id, g);
+    glLinkProgram(m_id);
+    GLint ok = 0; glGetProgramiv(m_id, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024]; glGetProgramInfoLog(m_id, sizeof(log), nullptr, log);
+        std::cerr << "Geometry Program link error: " << log << "\n";
+    }
+    glDeleteShader(v);
+    glDeleteShader(f);
+    glDeleteShader(g);
+}
+
 Shader::Shader(const char* cs) {
     GLuint c = compile(GL_COMPUTE_SHADER, cs);
     m_id = glCreateProgram();

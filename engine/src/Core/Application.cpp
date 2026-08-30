@@ -71,4 +71,7 @@ void Application::run() {
         // 7. Своп буферов
         m_window.swapBuffers();
     }
+
+    std::cout << "[Engine] Application run loop terminated! m_running=" << m_running 
+              << ", shouldClose=" << m_window.shouldClose() << "\n";
 }

@@ -10,28 +10,59 @@
 namespace Physics {
 
 // ============================================================================
-// AAA Drivable Vehicle & Traffic Physics System (GTA Style)
-// Поддержка:
-// - Управление игроком (W/S газ/тормоз/задний ход, A/D плавный руль, Space дрифт)
-// - Поворот передних колес (Steering angle)
-// - Вращение 4 колес пропорционально скорости
+// Universal Drivable Vehicle & Traffic Physics System
+// Полностью конфигурируемый компонент/класс физики транспортного средства:
+// - Управление игроком (акселерация, торможение, реверс, рулевое управление, дрифт)
+// - Поворот передних колес и динамика вращения
 // - Крен кузова при поворотах (Body Roll) и клевок при торможении (Pitch)
-// - Реалистичный разгон, инерция, торможение и дрифт
-// - Столкновения и расталкивание PhysX объектов с кинетической силой
-// - Фары, стоп-сигналы и динамический свет
+// - Конфигурируемые геометрические оффсеты колес и фар
+// - Опциональные границы перемещения (без захардкоженных констант)
 // ============================================================================
 
 struct WheelEntity {
     EntityRef entity;
-    glm::vec3 localOffset;
+    glm::vec3 localOffset{0.0f};
     float currentAngle = 0.0f;
     bool isFront = false;
 };
 
+struct VehicleParams {
+    float maxForwardSpeed = 18.0f;
+    float maxReverseSpeed = -6.5f;
+    float accelRate = 12.0f;
+    float brakeRate = 18.0f;
+    float coastDrag = 2.5f;
+    float maxSteerDegrees = 32.0f;
+    float steerSpeed = 85.0f;
+    float wheelRadius = 0.35f;
+    float bodyScale = 1.25f;
+
+    bool enableBounds = false;
+    glm::vec2 boundsX{-1000.0f, 1000.0f};
+    glm::vec2 boundsZ{-1000.0f, 1000.0f};
+
+    std::vector<glm::vec3> wheelOffsets = {
+        {-0.75f, 0.36f, 0.95f},
+        { 0.75f, 0.36f, 0.95f},
+        {-0.75f, 0.36f, -0.95f},
+        { 0.75f, 0.36f, -0.95f}
+    };
+    glm::vec3 headlightLeftOffset{-0.55f, 0.45f, 1.8f};
+    glm::vec3 headlightRightOffset{0.55f, 0.45f, 1.8f};
+};
+
 class Vehicle {
 public:
-    Vehicle(Scene& scene, const glm::vec3& startPos, float yaw, const std::string& modelPath, float maxSpeed = 18.0f)
-        : m_scene(&scene), m_pos(startPos), m_yaw(yaw), m_modelPath(modelPath), m_maxForwardSpeed(maxSpeed) {
+    Vehicle(Scene& scene, const glm::vec3& startPos, float yaw, const std::string& modelPath, float maxSpeed = 18.0f,
+            const std::string& wheelMeshPath = "", const std::string& texturePath = "")
+        : m_scene(&scene), m_pos(startPos), m_yaw(yaw), m_modelPath(modelPath), m_wheelMeshPath(wheelMeshPath), m_texturePath(texturePath) {
+        m_params.maxForwardSpeed = maxSpeed;
+        initVehicle();
+    }
+
+    Vehicle(Scene& scene, const glm::vec3& startPos, float yaw, const std::string& modelPath, const VehicleParams& params,
+            const std::string& wheelMeshPath = "", const std::string& texturePath = "")
+        : m_scene(&scene), m_pos(startPos), m_yaw(yaw), m_modelPath(modelPath), m_wheelMeshPath(wheelMeshPath), m_texturePath(texturePath), m_params(params) {
         initVehicle();
     }
 
@@ -52,6 +83,15 @@ public:
         m_handbrake = handbrake;
     }
 
+    void setBounds(bool enable, glm::vec2 boundsX, glm::vec2 boundsZ) {
+        m_params.enableBounds = enable;
+        m_params.boundsX = boundsX;
+        m_params.boundsZ = boundsZ;
+    }
+
+    VehicleParams& params() { return m_params; }
+    const VehicleParams& params() const { return m_params; }
+
     void update(float dt, cjoka_phys::World* physWorld) {
         if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
 
@@ -63,7 +103,7 @@ public:
 
         syncVisuals(dt);
 
-        // Силовое взаимодействие с препятствиями и бочками
+        // Силовое взаимодействие с препятствиями
         if (physWorld && std::abs(m_speed) > 0.5f) {
             float yawRad = glm::radians(m_yaw);
             glm::vec3 fwd(std::sin(yawRad), 0.0f, std::cos(yawRad));
@@ -95,44 +135,32 @@ public:
 private:
     void updatePlayerDriving(float dt, cjoka_phys::World* /*physWorld*/) {
         // 1. Рулевое управление с учетом скорости
-        // Инвертируем m_steerInput, чтобы D (+1) поворачивал вправо (уменьшал yaw)
-        float targetSteerAngle = -m_steerInput * m_maxSteerDegrees;
-        float steerSpeed = 85.0f; // deg/sec
+        float targetSteerAngle = -m_steerInput * m_params.maxSteerDegrees;
         if (m_currentSteerAngle < targetSteerAngle) {
-            m_currentSteerAngle = std::min(targetSteerAngle, m_currentSteerAngle + steerSpeed * dt);
+            m_currentSteerAngle = std::min(targetSteerAngle, m_currentSteerAngle + m_params.steerSpeed * dt);
         } else if (m_currentSteerAngle > targetSteerAngle) {
-            m_currentSteerAngle = std::max(targetSteerAngle, m_currentSteerAngle - steerSpeed * dt);
+            m_currentSteerAngle = std::max(targetSteerAngle, m_currentSteerAngle - m_params.steerSpeed * dt);
         }
 
         // 2. Разгон, торможение, накат
-        float accelRate = 12.0f;  // м/с^2
-        float brakeRate = 18.0f;  // м/с^2
-        float coastDrag = 2.5f;   // сопротивление воздуха
-        float reverseMax = -6.5f;
-
         if (m_handbrake) {
-            // Ручник: резкое торможение и возможность дрифта
-            if (m_speed > 0.0f) m_speed = std::max(0.0f, m_speed - brakeRate * 1.5f * dt);
-            else if (m_speed < 0.0f) m_speed = std::min(0.0f, m_speed + brakeRate * 1.5f * dt);
+            if (m_speed > 0.0f) m_speed = std::max(0.0f, m_speed - m_params.brakeRate * 1.5f * dt);
+            else if (m_speed < 0.0f) m_speed = std::min(0.0f, m_speed + m_params.brakeRate * 1.5f * dt);
         } else if (m_throttleInput > 0.05f) {
             if (m_speed < 0.0f) {
-                // Торможение при движении назад
-                m_speed += brakeRate * dt;
+                m_speed += m_params.brakeRate * dt;
             } else {
-                m_speed = std::min(m_maxForwardSpeed, m_speed + accelRate * m_throttleInput * dt);
+                m_speed = std::min(m_params.maxForwardSpeed, m_speed + m_params.accelRate * m_throttleInput * dt);
             }
         } else if (m_throttleInput < -0.05f) {
             if (m_speed > 0.0f) {
-                // Торможение при движении вперед
-                m_speed = std::max(0.0f, m_speed - brakeRate * std::abs(m_throttleInput) * dt);
+                m_speed = std::max(0.0f, m_speed - m_params.brakeRate * std::abs(m_throttleInput) * dt);
             } else {
-                // Задний ход
-                m_speed = std::max(reverseMax, m_speed - accelRate * 0.6f * std::abs(m_throttleInput) * dt);
+                m_speed = std::max(m_params.maxReverseSpeed, m_speed - m_params.accelRate * 0.6f * std::abs(m_throttleInput) * dt);
             }
         } else {
-            // Накат с затуханием
-            if (m_speed > 0.0f) m_speed = std::max(0.0f, m_speed - coastDrag * dt);
-            else if (m_speed < 0.0f) m_speed = std::min(0.0f, m_speed + coastDrag * dt);
+            if (m_speed > 0.0f) m_speed = std::max(0.0f, m_speed - m_params.coastDrag * dt);
+            else if (m_speed < 0.0f) m_speed = std::min(0.0f, m_speed + m_params.coastDrag * dt);
         }
 
         // 3. Поворот шасси (Yaw)
@@ -148,13 +176,13 @@ private:
         glm::vec3 fwd(std::sin(yawRad), 0.0f, std::cos(yawRad));
         m_pos += fwd * (m_speed * dt);
 
-        // Ограничение по границам сцены
-        m_pos.x = std::clamp(m_pos.x, -7.5f, 7.5f);
-        m_pos.z = std::clamp(m_pos.z, -245.0f, 245.0f);
-        m_pos.y = 0.0f;
+        if (m_params.enableBounds) {
+            m_pos.x = std::clamp(m_pos.x, m_params.boundsX.x, m_params.boundsX.y);
+            m_pos.z = std::clamp(m_pos.z, m_params.boundsZ.x, m_params.boundsZ.y);
+        }
 
         // 5. Динамика кузова (Body Roll & Pitch)
-        float targetRoll = -m_currentSteerAngle * (m_speed / m_maxForwardSpeed) * 0.35f;
+        float targetRoll = -m_currentSteerAngle * (m_speed / std::max(m_params.maxForwardSpeed, 1.0f)) * 0.35f;
         float targetPitch = (m_throttleInput > 0.0f ? -0.8f : 0.0f) + (m_throttleInput < 0.0f ? 1.2f : 0.0f);
         m_bodyRoll = glm::mix(m_bodyRoll, targetRoll, 1.0f - std::exp(-12.0f * dt));
         m_bodyPitch = glm::mix(m_bodyPitch, targetPitch, 1.0f - std::exp(-12.0f * dt));
@@ -170,10 +198,12 @@ private:
         glm::vec3 fwd(std::sin(yawRad), 0.0f, std::cos(yawRad));
         m_pos += fwd * (m_speed * dt);
 
-        if (m_pos.z < -240.0f) {
-            m_pos.z = 240.0f;
-        } else if (m_pos.z > 240.0f) {
-            m_pos.z = -240.0f;
+        if (m_params.enableBounds) {
+            if (m_pos.z < m_params.boundsZ.x) {
+                m_pos.z = m_params.boundsZ.y;
+            } else if (m_pos.z > m_params.boundsZ.y) {
+                m_pos.z = m_params.boundsZ.x;
+            }
         }
     }
 
@@ -186,8 +216,7 @@ private:
         }
 
         // 2. Вращение и поворот передних колес
-        float wheelRadius = 0.35f;
-        float wheelRotSpeed = (m_speed / wheelRadius) * 57.29578f; // deg/sec
+        float wheelRotSpeed = (m_speed / std::max(m_params.wheelRadius, 0.05f)) * 57.29578f; // deg/sec
         glm::mat4 rotM = glm::rotate(glm::mat4(1.0f), glm::radians(m_yaw), glm::vec3(0.0f, 1.0f, 0.0f));
 
         for (size_t i = 0; i < m_wheels.size(); ++i) {
@@ -208,61 +237,61 @@ private:
 
         // 3. Передние фары
         if (m_leftLight.valid()) {
-            m_leftLight.transform().position = m_pos + glm::vec3(rotM * glm::vec4(-0.55f, 0.45f, 1.6f, 1.0f));
+            m_leftLight.transform().position = m_pos + glm::vec3(rotM * glm::vec4(m_params.headlightLeftOffset, 1.0f));
         }
         if (m_rightLight.valid()) {
-            m_rightLight.transform().position = m_pos + glm::vec3(rotM * glm::vec4(0.55f, 0.45f, 1.6f, 1.0f));
+            m_rightLight.transform().position = m_pos + glm::vec3(rotM * glm::vec4(m_params.headlightRightOffset, 1.0f));
         }
     }
 
     void initVehicle() {
-        auto colorTex = Assets::Texture("assets/textures/colormap.png", true);
-        Material carMat = Material::Textured(colorTex, glm::vec3(1.0f), 0.4f, 0.1f);
-        Material wheelMat = Material::Textured(colorTex, glm::vec3(1.0f), 0.3f, 0.3f);
-
-        auto carMesh = Assets::Mesh(m_modelPath);
-        auto wheelMesh = Assets::Mesh("assets/models/cars/wheel.obj");
-
-        // 1. Цельный кузов реальной модели машины
-        m_chassis = m_scene->create("CarBody", Transform{m_pos, {0.0f, m_yaw, 0.0f}, glm::vec3(1.25f)});
-        m_chassis.add<MeshRenderer>(MeshRenderer(carMesh, carMat).setClusterLOD(false));
-
-        // 2. 4 Реалистичных колеса (точная посадка на оси)
-        struct WheelDef { glm::vec3 offset; bool isFront; };
-        WheelDef wheelDefs[4] = {
-            {{-0.75f, 0.36f, 0.95f}, true},  // FL
-            {{ 0.75f, 0.36f, 0.95f}, true},  // FR
-            {{-0.75f, 0.36f, -0.95f}, false}, // RL
-            {{ 0.75f, 0.36f, -0.95f}, false}  // RR
-        };
-
-        for (int i = 0; i < 4; ++i) {
-            bool isLeft = (wheelDefs[i].offset.x < 0.0f);
-            float baseYaw = isLeft ? (m_yaw + 180.0f) : m_yaw;
-            EntityRef wRef = m_scene->create("Wheel_" + std::to_string(i), Transform{m_pos + wheelDefs[i].offset, {0.0f, baseYaw, 0.0f}, glm::vec3(1.25f)});
-            wRef.add<MeshRenderer>(MeshRenderer(wheelMesh, wheelMat).setClusterLOD(false));
-            m_wheels.push_back({wRef, wheelDefs[i].offset, 0.0f, wheelDefs[i].isFront});
+        Material carMat = Material::Default();
+        Material wheelMat = Material::Default();
+        if (!m_texturePath.empty()) {
+            auto colorTex = Assets::Texture(m_texturePath, true);
+            if (colorTex && colorTex->valid()) {
+                carMat = Material::Textured(colorTex, glm::vec3(1.0f), 0.4f, 0.1f);
+                wheelMat = Material::Textured(colorTex, glm::vec3(1.0f), 0.3f, 0.3f);
+            }
         }
 
-        // 3. Источники света фар
-        m_leftLight = m_scene->createPointLight(Transform{m_pos + glm::vec3(-0.55f, 0.45f, 1.8f)}, PointLight::Warm({1.0f, 0.95f, 0.85f}, 7.0f, 1.8f), "CarLightL");
-        m_rightLight = m_scene->createPointLight(Transform{m_pos + glm::vec3(0.55f, 0.45f, 1.8f)}, PointLight::Warm({1.0f, 0.95f, 0.85f}, 7.0f, 1.8f), "CarLightR");
+        auto carMesh = (!m_modelPath.empty()) ? Assets::Mesh(m_modelPath) : Assets::Cube(1.0f);
+        std::shared_ptr<Mesh3D> wheelMesh = (!m_wheelMeshPath.empty()) ? Assets::Mesh(m_wheelMeshPath) : Assets::Sphere(m_params.wheelRadius);
+
+        // 1. Кузов
+        m_chassis = m_scene->create("CarBody", Transform{m_pos, {0.0f, m_yaw, 0.0f}, glm::vec3(m_params.bodyScale)});
+        m_chassis.add<MeshRenderer>(MeshRenderer(carMesh, carMat).setClusterLOD(false));
+
+        // 2. Колеса
+        for (size_t i = 0; i < m_params.wheelOffsets.size(); ++i) {
+            const auto& offset = m_params.wheelOffsets[i];
+            bool isFront = (offset.z > 0.0f);
+            bool isLeft = (offset.x < 0.0f);
+            float baseYaw = isLeft ? (m_yaw + 180.0f) : m_yaw;
+            EntityRef wRef = m_scene->create("Wheel_" + std::to_string(i), Transform{m_pos + offset, {0.0f, baseYaw, 0.0f}, glm::vec3(m_params.bodyScale)});
+            wRef.add<MeshRenderer>(MeshRenderer(wheelMesh, wheelMat).setClusterLOD(false));
+            m_wheels.push_back({wRef, offset, 0.0f, isFront});
+        }
+
+        // 3. Фары
+        m_leftLight = m_scene->createPointLight(Transform{m_pos + m_params.headlightLeftOffset}, PointLight::Warm({1.0f, 0.95f, 0.85f}, 7.0f, 1.8f), "CarLightL");
+        m_rightLight = m_scene->createPointLight(Transform{m_pos + m_params.headlightRightOffset}, PointLight::Warm({1.0f, 0.95f, 0.85f}, 7.0f, 1.8f), "CarLightR");
     }
 
     Scene* m_scene = nullptr;
     glm::vec3 m_pos{0.0f};
     float m_yaw = 0.0f;
     std::string m_modelPath;
-    float m_speed = 0.0f;
-    float m_maxForwardSpeed = 18.0f;
+    std::string m_wheelMeshPath;
+    std::string m_texturePath;
+    VehicleParams m_params;
 
-    // Управление
+    float m_speed = 0.0f;
     bool m_isPlayerControlled = false;
     float m_throttleInput = 0.0f;
     float m_steerInput = 0.0f;
     bool m_handbrake = false;
     float m_currentSteerAngle = 0.0f;
-    float m_maxSteerDegrees = 32.0f;
     float m_bodyRoll = 0.0f;
     float m_bodyPitch = 0.0f;
 

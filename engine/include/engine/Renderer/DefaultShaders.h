@@ -121,8 +121,10 @@ out vec3 vColor; out vec2 vUV; out vec3 vNormal; out vec3 vWorldPos; out vec3 vT
 out vec4 vCurrClip; out vec4 vPrevClip;
 uniform mat4 uMVP; uniform mat4 uModel; uniform mat3 uNormalMat;
 uniform mat4 uPrevModel; uniform mat4 uPrevViewProj;
+uniform vec2 uUVTiling;
 void main(){
-    vColor=aColor; vUV=aUV;
+    vec2 tiling = (uUVTiling.x > 0.0 && uUVTiling.y > 0.0) ? uUVTiling : vec2(1.0);
+    vColor=aColor; vUV=aUV * tiling;
     vec4 wp=uModel*vec4(aPos,1.0); vWorldPos=wp.xyz;
     vNormal=normalize(uNormalMat*aNormal);
     vec3 N = vNormal;
@@ -160,10 +162,10 @@ uniform float uZFar;
 const uvec3 GRID_SIZE = uvec3(16, 9, 24);
 
 // PBR
-uniform vec3 uAlbedo; uniform float uMetallic; uniform float uRoughness; uniform float uAO;
+uniform vec3 uAlbedo; uniform float uMetallic; uniform float uRoughness; uniform float uAO; uniform float uWetness;
 uniform vec3 uEmissive;
 uniform sampler2D uDiffuseMap; uniform bool uUseDiffuseMap;
-uniform sampler2D uNormalMap; uniform bool uUseNormalMap;
+uniform sampler2D uNormalMap; uniform bool uUseNormalMap; uniform float uNormalScale;
 uniform sampler2D uSpecularMap; uniform bool uUseSpecularMap;
 // cascaded shadows
 uniform mat4 uLightMatrices[3];
@@ -173,6 +175,119 @@ uniform bool uHasShadow;
 uniform vec3 uFogColor; uniform float uFogDensity; uniform float uExposure;
 // sky environment IBL
 uniform vec3 uSkyTop; uniform vec3 uSkyHorizon; uniform vec3 uSkyBottom; uniform float uSkyExposure;
+
+// VXGI
+uniform sampler3D uVoxelGrid;
+uniform bool uUseVXGI;
+uniform vec3 uVoxelCenter;
+uniform float uVoxelExtent;
+uniform float uVXGIIntensity;
+
+vec3 WorldToVoxel(vec3 p) {
+    return (p - (uVoxelCenter - vec3(uVoxelExtent * 0.5))) / uVoxelExtent;
+}
+
+vec4 TraceCone(vec3 origin, vec3 dir, float aperture, float maxDist) {
+    vec4 accum = vec4(0.0);
+    float dist = 0.4;
+    float voxelSize = uVoxelExtent / 64.0;
+
+    while (dist < maxDist && accum.a < 0.95) {
+        vec3 p = origin + dir * dist;
+        vec3 uvw = WorldToVoxel(p);
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) break;
+
+        float diameter = 2.0 * aperture * dist;
+        float mipLevel = clamp(log2(max(diameter / voxelSize, 1.0)), 0.0, 5.0);
+
+        vec4 voxelSample = textureLod(uVoxelGrid, uvw, mipLevel);
+        float a = 1.0 - accum.a;
+        accum.rgb += voxelSample.rgb * voxelSample.a * a;
+        accum.a += voxelSample.a * a;
+
+        dist += max(diameter * 0.5, voxelSize);
+    }
+    return accum;
+}
+
+vec3 CalculateVXGI(vec3 worldPos, vec3 N, vec3 V, float roughness, vec3 albedo) {
+    if (!uUseVXGI) return vec3(0.0);
+
+    vec3 up = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+
+    vec3 coneDirs[6] = vec3[](
+        N,
+        normalize(N + tangent * 0.5),
+        normalize(N - tangent * 0.5),
+        normalize(N + bitangent * 0.5),
+        normalize(N - bitangent * 0.5),
+        normalize(N + (tangent + bitangent) * 0.35)
+    );
+    float coneWeights[6] = float[](0.35, 0.13, 0.13, 0.13, 0.13, 0.13);
+
+    vec3 indirectDiffuse = vec3(0.0);
+    float diffuseAperture = 0.577; // tan(30 deg)
+    for (int i = 0; i < 6; ++i) {
+        vec4 c = TraceCone(worldPos + N * 0.15, coneDirs[i], diffuseAperture, uVoxelExtent * 0.6);
+        indirectDiffuse += c.rgb * coneWeights[i];
+    }
+
+    return (indirectDiffuse * albedo) * uVXGIIntensity;
+}
+
+// Light Probes SSBO (Baked Mixed Lighting)
+struct GPULightProbe {
+    vec4 pos;
+    vec4 sh[9];
+};
+
+layout(std430, binding = 6) readonly buffer LightProbeBlock {
+    vec4 uProbeMin;
+    vec4 uProbeMax;
+    ivec4 uProbeCounts;
+    GPULightProbe uLightProbes[];
+};
+
+uniform bool uUseLightProbes;
+uniform float uLightProbeIntensity;
+
+vec3 SampleProbeIrradiance(vec3 worldPos, vec3 N) {
+    if (!uUseLightProbes || uProbeCounts.w <= 0) return vec3(0.0);
+
+    vec3 minB = uProbeMin.xyz;
+    vec3 maxB = uProbeMax.xyz;
+    ivec3 counts = uProbeCounts.xyz;
+
+    vec3 local = (worldPos - minB) / (maxB - minB);
+    if (any(lessThan(local, vec3(0.0))) || any(greaterThan(local, vec3(1.0)))) return vec3(0.0);
+
+    vec3 fIndex = local * vec3(counts - ivec3(1));
+    ivec3 i0 = clamp(ivec3(fIndex), ivec3(0), counts - ivec3(2));
+    ivec3 i1 = i0 + ivec3(1);
+    vec3 t = fract(fIndex);
+
+    int idx000 = i0.z * counts.x * counts.y + i0.y * counts.x + i0.x;
+    int idx100 = i0.z * counts.x * counts.y + i0.y * counts.x + i1.x;
+    int idx010 = i0.z * counts.x * counts.y + i1.y * counts.x + i0.x;
+    int idx110 = i0.z * counts.x * counts.y + i1.y * counts.x + i1.x;
+    int idx001 = i1.z * counts.x * counts.y + i0.y * counts.x + i0.x;
+    int idx101 = i1.z * counts.x * counts.y + i0.y * counts.x + i1.x;
+    int idx011 = i1.z * counts.x * counts.y + i1.y * counts.x + i0.x;
+    int idx111 = i1.z * counts.x * counts.y + i1.y * counts.x + i1.x;
+
+    vec3 sh00 = mix(uLightProbes[idx000].sh[0].rgb, uLightProbes[idx100].sh[0].rgb, t.x);
+    vec3 sh01 = mix(uLightProbes[idx010].sh[0].rgb, uLightProbes[idx110].sh[0].rgb, t.x);
+    vec3 shY0 = mix(sh00, sh01, t.y);
+
+    vec3 sh10 = mix(uLightProbes[idx001].sh[0].rgb, uLightProbes[idx101].sh[0].rgb, t.x);
+    vec3 sh11 = mix(uLightProbes[idx011].sh[0].rgb, uLightProbes[idx111].sh[0].rgb, t.x);
+    vec3 shY1 = mix(sh10, sh11, t.y);
+
+    vec3 l0 = mix(shY0, shY1, t.z);
+    return l0 * (0.5 + 0.5 * N.y) * uLightProbeIntensity;
+}
 
 const float PI = 3.14159265359;
 
@@ -191,22 +306,23 @@ float GeometrySmith(float NoV, float NoL, float rough){
 vec3 FresnelSchlick(float cosTheta, vec3 F0){
     return F0 + (1.0-F0)*pow(clamp(1.0-cosTheta,0.0,1.0),5.0);
 }
-float shadowFactor(vec3 worldPos, vec3 N, vec3 L, float viewDist){
-    if(!uHasShadow) return 1.0;
-    
-    // Select cascade index based on view distance
-    int cascadeIndex = 2;
-    if (viewDist < uCascadeSplits[1]) {
-        cascadeIndex = 0;
-    } else if (viewDist < uCascadeSplits[2]) {
-        cascadeIndex = 1;
-    }
-
+float sampleCascade(int cascadeIndex, vec3 worldPos, vec3 N, vec3 L) {
     vec4 lp = uLightMatrices[cascadeIndex] * vec4(worldPos, 1.0);
     vec3 proj = lp.xyz / lp.w * 0.5 + 0.5;
-    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) return 1.0;
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
+        if (cascadeIndex < 2) {
+            vec4 lpNext = uLightMatrices[cascadeIndex + 1] * vec4(worldPos, 1.0);
+            vec3 projNext = lpNext.xyz / lpNext.w * 0.5 + 0.5;
+            if (projNext.z <= 1.0 && projNext.x >= 0.0 && projNext.x <= 1.0 && projNext.y >= 0.0 && projNext.y <= 1.0) {
+                float biasN = max(0.0025 * (1.0 - dot(N, L)), 0.0008) * (1.0 + float(cascadeIndex + 1) * 1.5);
+                float d = texture(uShadowMapArray, vec3(projNext.xy, float(cascadeIndex + 1))).r;
+                return (projNext.z - biasN > d) ? 0.0 : 1.0;
+            }
+        }
+        return 1.0;
+    }
 
-    float bias = max(0.0020 * (1.0 - dot(N, L)), 0.0006) * (1.0 + float(cascadeIndex) * 1.5);
+    float bias = max(0.0025 * (1.0 - dot(N, L)), 0.0008) * (1.0 + float(cascadeIndex) * 1.5);
     vec2 texelSize = 1.0 / vec2(textureSize(uShadowMapArray, 0).xy);
     float radius = (1.4 + float(cascadeIndex) * 0.8) * texelSize.x;
 
@@ -224,6 +340,31 @@ float shadowFactor(vec3 worldPos, vec3 N, vec3 L, float viewDist){
     }
     return s * 0.0625;
 }
+
+float shadowFactor(vec3 worldPos, vec3 N, vec3 L, float viewDist){
+    if(!uHasShadow) return 1.0;
+    
+    int cascadeIndex = 2;
+    float blend = 0.0;
+    int nextCascade = 2;
+
+    if (viewDist < uCascadeSplits[1]) {
+        cascadeIndex = 0;
+        float d = uCascadeSplits[1] - viewDist;
+        if (d < 3.0) { blend = 1.0 - (d / 3.0); nextCascade = 1; }
+    } else if (viewDist < uCascadeSplits[2]) {
+        cascadeIndex = 1;
+        float d = uCascadeSplits[2] - viewDist;
+        if (d < 5.0) { blend = 1.0 - (d / 5.0); nextCascade = 2; }
+    }
+
+    float s = sampleCascade(cascadeIndex, worldPos, N, L);
+    if (blend > 0.0) {
+        float sNext = sampleCascade(nextCascade, worldPos, N, L);
+        s = mix(s, sNext, blend);
+    }
+    return s;
+}
 vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, float rough, float metallic){
     vec3 H = normalize(V+L);
     float NoV = max(dot(N,V),1e-4);
@@ -239,26 +380,52 @@ vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, flo
 }
 
 vec3 SampleSky(vec3 dir, float rough) {
-    float t = clamp(dir.y * (1.0 - rough * 0.7) * 0.5 + 0.5, 0.0, 1.0);
+    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 skyColor = mix(uSkyBottom, uSkyTop, t);
-    if(dir.y > -0.15 && dir.y < 0.35) {
-        float h = 1.0 - abs(dir.y - 0.1) / 0.25;
-        skyColor = mix(skyColor, uSkyHorizon, clamp(h, 0.0, 1.0));
+    
+    // Horizon glow & atmospheric scattering band
+    float horizonFactor = pow(clamp(1.0 - abs(dir.y), 0.0, 1.0), 3.0);
+    skyColor = mix(skyColor, uSkyHorizon * 1.6, horizonFactor);
+
+    // Sun / Moon specular highlight in sky reflection
+    if (uHasDirLight) {
+        vec3 sunDir = normalize(-uDirLight.direction);
+        float sunDot = max(dot(dir, sunDir), 0.0);
+        float sunExp = mix(256.0, 4.0, clamp(rough, 0.0, 1.0));
+        vec3 sunSpecular = uDirLight.color * pow(sunDot, sunExp) * (1.0 - rough * 0.8) * 3.0;
+        skyColor += sunSpecular;
     }
+
+    // Roughness blur towards ambient hemispherical mean
+    vec3 ambientMean = mix(uSkyBottom, (uSkyTop + uSkyHorizon) * 0.5, 0.5);
+    skyColor = mix(skyColor, ambientMean, clamp(rough * 0.8, 0.0, 1.0));
+
     return skyColor * uSkyExposure;
+}
+
+mat3 CotangentFrame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)) + 1e-10);
+    return mat3(T * invmax, B * invmax, N);
 }
 
 void main(){
     vec3 N = normalize(vNormal);
+    if (!gl_FrontFacing) N = -N;
     
-    // Normal mapping
+    // Normal mapping with true UV-aligned Cotangent Frame & scalable strength
     if(uUseNormalMap) {
-        vec3 T = normalize(vTangent);
-        vec3 B = normalize(vBitangent);
-        mat3 TBN = mat3(T, B, N);
-        vec3 normalMap = texture(uNormalMap, vUV).rgb;
-        normalMap = normalMap * 2.0 - 1.0;
-        N = normalize(TBN * normalMap);
+        vec3 mapN = texture(uNormalMap, vUV).xyz * 2.0 - 1.0;
+        mapN.xy *= uNormalScale;
+        mat3 TBN = CotangentFrame(N, vWorldPos, vUV);
+        N = normalize(TBN * mapN);
     }
     
     vec3 V = normalize(uViewPos - vWorldPos);
@@ -266,9 +433,21 @@ void main(){
     float NoV = max(dot(N, V), 1e-4);
 
     vec3 albedo = uAlbedo * vColor;
-    if(uUseDiffuseMap) albedo *= texture(uDiffuseMap,vUV).rgb;
+    if(uUseDiffuseMap) {
+        vec4 diff = texture(uDiffuseMap, vUV);
+        if (diff.a < 0.05) discard;
+        albedo *= diff.rgb;
+    }
     float metallic = clamp(uMetallic,0.0,1.0);
     float rough = clamp(uRoughness,0.04,1.0);
+
+    // Wetness effect: rain darkens albedo and flattens roughness for mirror reflections
+    if(uWetness > 0.001) {
+        float w = clamp(uWetness, 0.0, 1.0);
+        albedo = mix(albedo, albedo * 0.65, w);
+        rough = mix(rough, max(rough * 0.08, 0.02), w);
+    }
+
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     
     // Specular map: R=specular intensity, G=glossiness(1-roughness), B=fresnel
@@ -285,14 +464,17 @@ void main(){
     
     vec3 skySpecular = SampleSky(R, rough);
     vec3 specularEnv = F_env * skySpecular;
-    vec3 ambient = (diffuseEnv + specularEnv) * uAO;
+    vec3 vxgiBounce = CalculateVXGI(vWorldPos, N, V, rough, albedo);
+    vec3 probeGI = SampleProbeIrradiance(vWorldPos, N) * albedo;
+    vec3 ambient = (diffuseEnv + specularEnv + vxgiBounce + probeGI) * uAO;
 
     vec3 Lo = vec3(0.0);
     if(uHasDirLight){
         vec3 L = normalize(-uDirLight.direction);
         float NoL = dot(N, L);
         if(NoL > 0.0){
-            float sh = shadowFactor(vWorldPos,N,L, length(vWorldPos-uViewPos));
+            float viewZ = abs((uView * vec4(vWorldPos, 1.0)).z);
+            float sh = shadowFactor(vWorldPos, N, L, viewZ);
             vec3 radiance = uDirLight.color*uDirLight.intensity;
             Lo += ApplyLight(N,V,L,radiance,F0,albedo,rough,metallic)*sh;
         }
@@ -345,8 +527,10 @@ out vec4 vInstAlbedo; out vec4 vInstEmissive;
 out vec4 vCurrClip; out vec4 vPrevClip;
 uniform mat4 uView; uniform mat4 uProj;
 uniform mat4 uPrevViewProj;
+uniform vec2 uUVTiling;
 void main(){
-    vColor=aColor; vUV=aUV;
+    vec2 tiling = (uUVTiling.x > 0.0 && uUVTiling.y > 0.0) ? uUVTiling : vec2(1.0);
+    vColor=aColor; vUV=aUV * tiling;
     vInstAlbedo=aInstanceAlbedo; vInstEmissive=aInstanceEmissive;
     vec4 wp=aInstanceModel*vec4(aPos,1.0); vWorldPos=wp.xyz;
     mat3 nm=transpose(inverse(mat3(aInstanceModel)));
@@ -380,8 +564,10 @@ uniform float uZNear;
 uniform float uZFar;
 const uvec3 GRID_SIZE = uvec3(16, 9, 24);
 
+uniform float uAO;
+uniform float uWetness;
 uniform sampler2D uDiffuseMap; uniform bool uUseDiffuseMap;
-uniform sampler2D uNormalMap; uniform bool uUseNormalMap;
+uniform sampler2D uNormalMap; uniform bool uUseNormalMap; uniform float uNormalScale;
 uniform sampler2D uSpecularMap; uniform bool uUseSpecularMap;
 uniform vec3 uFogColor; uniform float uFogDensity;
 // cascaded shadows
@@ -391,6 +577,119 @@ uniform sampler2DArray uShadowMapArray;
 uniform bool uHasShadow;
 // sky environment IBL
 uniform vec3 uSkyTop; uniform vec3 uSkyHorizon; uniform vec3 uSkyBottom; uniform float uSkyExposure;
+
+// VXGI
+uniform sampler3D uVoxelGrid;
+uniform bool uUseVXGI;
+uniform vec3 uVoxelCenter;
+uniform float uVoxelExtent;
+uniform float uVXGIIntensity;
+
+vec3 WorldToVoxel(vec3 p) {
+    return (p - (uVoxelCenter - vec3(uVoxelExtent * 0.5))) / uVoxelExtent;
+}
+
+vec4 TraceCone(vec3 origin, vec3 dir, float aperture, float maxDist) {
+    vec4 accum = vec4(0.0);
+    float dist = 0.4;
+    float voxelSize = uVoxelExtent / 64.0;
+
+    while (dist < maxDist && accum.a < 0.95) {
+        vec3 p = origin + dir * dist;
+        vec3 uvw = WorldToVoxel(p);
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) break;
+
+        float diameter = 2.0 * aperture * dist;
+        float mipLevel = clamp(log2(max(diameter / voxelSize, 1.0)), 0.0, 5.0);
+
+        vec4 voxelSample = textureLod(uVoxelGrid, uvw, mipLevel);
+        float a = 1.0 - accum.a;
+        accum.rgb += voxelSample.rgb * voxelSample.a * a;
+        accum.a += voxelSample.a * a;
+
+        dist += max(diameter * 0.5, voxelSize);
+    }
+    return accum;
+}
+
+vec3 CalculateVXGI(vec3 worldPos, vec3 N, vec3 V, float roughness, vec3 albedo) {
+    if (!uUseVXGI) return vec3(0.0);
+
+    vec3 up = abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, N));
+    vec3 bitangent = cross(N, tangent);
+
+    vec3 coneDirs[6] = vec3[](
+        N,
+        normalize(N + tangent * 0.5),
+        normalize(N - tangent * 0.5),
+        normalize(N + bitangent * 0.5),
+        normalize(N - bitangent * 0.5),
+        normalize(N + (tangent + bitangent) * 0.35)
+    );
+    float coneWeights[6] = float[](0.35, 0.13, 0.13, 0.13, 0.13, 0.13);
+
+    vec3 indirectDiffuse = vec3(0.0);
+    float diffuseAperture = 0.577; // tan(30 deg)
+    for (int i = 0; i < 6; ++i) {
+        vec4 c = TraceCone(worldPos + N * 0.15, coneDirs[i], diffuseAperture, uVoxelExtent * 0.6);
+        indirectDiffuse += c.rgb * coneWeights[i];
+    }
+
+    return (indirectDiffuse * albedo) * uVXGIIntensity;
+}
+
+// Light Probes SSBO (Baked Mixed GI)
+struct GPULightProbe {
+    vec4 pos;
+    vec4 sh[9];
+};
+
+layout(std430, binding = 6) readonly buffer LightProbeBlockInst {
+    vec4 uProbeMin;
+    vec4 uProbeMax;
+    ivec4 uProbeCounts;
+    GPULightProbe uLightProbes[];
+};
+
+uniform bool uUseLightProbes;
+uniform float uLightProbeIntensity;
+
+vec3 SampleProbeIrradiance(vec3 worldPos, vec3 N) {
+    if (!uUseLightProbes || uProbeCounts.w <= 0) return vec3(0.0);
+
+    vec3 minB = uProbeMin.xyz;
+    vec3 maxB = uProbeMax.xyz;
+    ivec3 counts = uProbeCounts.xyz;
+
+    vec3 local = (worldPos - minB) / (maxB - minB);
+    if (any(lessThan(local, vec3(0.0))) || any(greaterThan(local, vec3(1.0)))) return vec3(0.0);
+
+    vec3 fIndex = local * vec3(counts - ivec3(1));
+    ivec3 i0 = clamp(ivec3(fIndex), ivec3(0), counts - ivec3(2));
+    ivec3 i1 = i0 + ivec3(1);
+    vec3 t = fract(fIndex);
+
+    int idx000 = i0.z * counts.x * counts.y + i0.y * counts.x + i0.x;
+    int idx100 = i0.z * counts.x * counts.y + i0.y * counts.x + i1.x;
+    int idx010 = i0.z * counts.x * counts.y + i1.y * counts.x + i0.x;
+    int idx110 = i0.z * counts.x * counts.y + i1.y * counts.x + i1.x;
+    int idx001 = i1.z * counts.x * counts.y + i0.y * counts.x + i0.x;
+    int idx101 = i1.z * counts.x * counts.y + i0.y * counts.x + i1.x;
+    int idx011 = i1.z * counts.x * counts.y + i1.y * counts.x + i0.x;
+    int idx111 = i1.z * counts.x * counts.y + i1.y * counts.x + i1.x;
+
+    vec3 sh00 = mix(uLightProbes[idx000].sh[0].rgb, uLightProbes[idx100].sh[0].rgb, t.x);
+    vec3 sh01 = mix(uLightProbes[idx010].sh[0].rgb, uLightProbes[idx110].sh[0].rgb, t.x);
+    vec3 shY0 = mix(sh00, sh01, t.y);
+
+    vec3 sh10 = mix(uLightProbes[idx001].sh[0].rgb, uLightProbes[idx101].sh[0].rgb, t.x);
+    vec3 sh11 = mix(uLightProbes[idx011].sh[0].rgb, uLightProbes[idx111].sh[0].rgb, t.x);
+    vec3 shY1 = mix(sh10, sh11, t.y);
+
+    vec3 l0 = mix(shY0, shY1, t.z);
+    return l0 * (0.5 + 0.5 * N.y) * uLightProbeIntensity;
+}
 
 const float PI = 3.14159265359;
 
@@ -419,21 +718,23 @@ float GeometrySmith(float NoV, float NoL, float rough){
 vec3 FresnelSchlick(float cosTheta, vec3 F0){
     return F0 + (1.0-F0)*pow(clamp(1.0-cosTheta,0.0,1.0),5.0);
 }
-float shadowFactorI(vec3 worldPos, vec3 N, vec3 L, float viewDist){
-    if(!uHasShadow) return 1.0;
-    
-    int cascadeIndex = 2;
-    if (viewDist < uCascadeSplits[1]) {
-        cascadeIndex = 0;
-    } else if (viewDist < uCascadeSplits[2]) {
-        cascadeIndex = 1;
-    }
-
+float sampleCascadeI(int cascadeIndex, vec3 worldPos, vec3 N, vec3 L) {
     vec4 lp = uLightMatrices[cascadeIndex] * vec4(worldPos, 1.0);
     vec3 proj = lp.xyz / lp.w * 0.5 + 0.5;
-    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) return 1.0;
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) {
+        if (cascadeIndex < 2) {
+            vec4 lpNext = uLightMatrices[cascadeIndex + 1] * vec4(worldPos, 1.0);
+            vec3 projNext = lpNext.xyz / lpNext.w * 0.5 + 0.5;
+            if (projNext.z <= 1.0 && projNext.x >= 0.0 && projNext.x <= 1.0 && projNext.y >= 0.0 && projNext.y <= 1.0) {
+                float biasN = max(0.0025 * (1.0 - dot(N, L)), 0.0008) * (1.0 + float(cascadeIndex + 1) * 1.5);
+                float d = texture(uShadowMapArray, vec3(projNext.xy, float(cascadeIndex + 1))).r;
+                return (projNext.z - biasN > d) ? 0.0 : 1.0;
+            }
+        }
+        return 1.0;
+    }
 
-    float bias = max(0.0020 * (1.0 - dot(N, L)), 0.0006) * (1.0 + float(cascadeIndex) * 1.5);
+    float bias = max(0.0025 * (1.0 - dot(N, L)), 0.0008) * (1.0 + float(cascadeIndex) * 1.5);
     vec2 texelSize = 1.0 / vec2(textureSize(uShadowMapArray, 0).xy);
     float radius = (1.4 + float(cascadeIndex) * 0.8) * texelSize.x;
 
@@ -451,6 +752,32 @@ float shadowFactorI(vec3 worldPos, vec3 N, vec3 L, float viewDist){
     }
     return s * 0.0625;
 }
+
+float shadowFactorI(vec3 worldPos, vec3 N, vec3 L, float viewDist){
+    if(!uHasShadow) return 1.0;
+    
+    int cascadeIndex = 2;
+    float blend = 0.0;
+    int nextCascade = 2;
+
+    if (viewDist < uCascadeSplits[1]) {
+        cascadeIndex = 0;
+        float d = uCascadeSplits[1] - viewDist;
+        if (d < 3.0) { blend = 1.0 - (d / 3.0); nextCascade = 1; }
+    } else if (viewDist < uCascadeSplits[2]) {
+        cascadeIndex = 1;
+        float d = uCascadeSplits[2] - viewDist;
+        if (d < 5.0) { blend = 1.0 - (d / 5.0); nextCascade = 2; }
+    }
+
+    float s = sampleCascadeI(cascadeIndex, worldPos, N, L);
+    if (blend > 0.0) {
+        float sNext = sampleCascadeI(nextCascade, worldPos, N, L);
+        s = mix(s, sNext, blend);
+    }
+    return s;
+}
+
 vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, float rough, float metallic){
     vec3 Hv = normalize(V+L);
     float NoV = max(dot(N,V),1e-4);
@@ -464,9 +791,28 @@ vec3 ApplyLight(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 F0, vec3 albedo, flo
     return (kd*albedo/PI + spec)*radiance*NoL;
 }
 
+mat3 CotangentFrame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)) + 1e-10);
+    return mat3(T * invmax, B * invmax, N);
+}
+
 void main(){
     vec3 N=normalize(vNormal);
-    if(uUseNormalMap){vec3 T=normalize(vTangent);vec3 B=normalize(vBitangent);mat3 TBN=mat3(T,B,N);vec3 nm=texture(uNormalMap,vUV).rgb*2.0-1.0;N=normalize(TBN*nm);}
+    if (!gl_FrontFacing) N = -N;
+    if(uUseNormalMap){
+        vec3 mapN=texture(uNormalMap,vUV).xyz*2.0-1.0;
+        mapN.xy *= (uNormalScale * 3.0);
+        mat3 TBN = CotangentFrame(N, vWorldPos, vUV);
+        N=normalize(TBN*mapN);
+    }
     vec3 V=normalize(uViewPos - vWorldPos);
     vec3 R = reflect(-V, N);
     float NoV = max(dot(N, V), 1e-4);
@@ -474,8 +820,24 @@ void main(){
     vec3 albedo=vInstAlbedo.rgb * vColor;
     float rough = clamp(vInstAlbedo.a, 0.04, 1.0);
     float metallic = clamp(vInstEmissive.a, 0.0, 1.0);
-    if(uUseDiffuseMap) albedo*=texture(uDiffuseMap,vUV).rgb;
-    if(uUseSpecularMap){vec3 sm=texture(uSpecularMap,vUV).rgb;rough=clamp(1.0-sm.g,0.04,1.0);albedo=mix(albedo,albedo*sm.r,0.3);}
+    if(uUseDiffuseMap) {
+        vec4 diff = texture(uDiffuseMap, vUV);
+        if (diff.a < 0.05) discard;
+        albedo *= diff.rgb;
+    }
+    
+    // Wetness effect: rain darkens albedo and flattens roughness for mirror reflections
+    if(uWetness > 0.001) {
+        float w = clamp(uWetness, 0.0, 1.0);
+        albedo = mix(albedo, albedo * 0.65, w);
+        rough = mix(rough, max(rough * 0.08, 0.02), w);
+    }
+
+    if(uUseSpecularMap){
+        vec3 sm=texture(uSpecularMap,vUV).rgb;
+        rough=clamp(1.0-sm.g,0.04,1.0);
+        albedo=mix(albedo,albedo*sm.r,0.3);
+    }
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 F_env = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(clamp(1.0 - NoV, 0.0, 1.0), 5.0);
@@ -484,14 +846,17 @@ void main(){
     
     vec3 skySpecular = SampleSkyI(R, rough);
     vec3 specularEnv = F_env * skySpecular;
-    vec3 ambient = (diffuseEnv + specularEnv);
+    vec3 vxgiBounce = CalculateVXGI(vWorldPos, N, V, rough, albedo);
+    vec3 probeGI = SampleProbeIrradiance(vWorldPos, N) * albedo;
+    vec3 ambient = (diffuseEnv + specularEnv + vxgiBounce + probeGI) * uAO;
 
     vec3 Lo=vec3(0.0);
     if(uHasDirLight){
         vec3 L=normalize(-uDirLight.direction);
         float NoL = dot(N, L);
         if(NoL > 0.0){
-            float sh=shadowFactorI(vWorldPos,N,L, length(vWorldPos-uViewPos));
+            float viewZ = abs((uView * vec4(vWorldPos, 1.0)).z);
+            float sh = shadowFactorI(vWorldPos, N, L, viewZ);
             Lo += ApplyLight(N,V,L,uDirLight.color*uDirLight.intensity,F0,albedo,rough,metallic)*sh;
         }
     }
@@ -531,9 +896,9 @@ layout(location=0) in vec3 aPos;
 out vec3 vDir;
 uniform mat4 uView; uniform mat4 uProj;
 void main(){
-    vDir=aPos;
-    vec4 pos=uProj*uView*vec4(aPos,1.0);
-    gl_Position=pos.xyww;
+    vDir = aPos;
+    vec4 pos = uProj * uView * vec4(aPos, 1.0);
+    gl_Position = vec4(pos.xy, pos.w * 0.99999, pos.w);
 }
 )";
 inline const char* kSkyFS = R"(#version 460 core
@@ -684,12 +1049,16 @@ layout(location=1) in vec3 aColor;
 layout(location=2) in vec3 aNormal;
 layout(location=3) in vec2 aUV;
 layout(location=4) in mat4 aModel; // 4,5,6,7 — per-instance
+layout(location=8) in mat4 aPrevModel; // 8,9,10,11 — per-instance prev model
 out vec3 vColor; out vec2 vUV; out vec3 vNormal; out vec3 vWorldPos;
 out vec3 vTangent; out vec3 vBitangent;
 out vec4 vCurrClip; out vec4 vPrevClip;
 uniform mat4 uView; uniform mat4 uProj;
+uniform mat4 uPrevViewProj;
+uniform vec2 uUVTiling;
 void main(){
-    vColor=aColor; vUV=aUV;
+    vec2 tiling = (uUVTiling.x > 0.0 && uUVTiling.y > 0.0) ? uUVTiling : vec2(1.0);
+    vColor=aColor; vUV=aUV * tiling;
     vec4 wp = aModel * vec4(aPos,1.0);
     vWorldPos = wp.xyz;
     mat3 nm = transpose(inverse(mat3(aModel)));
@@ -700,7 +1069,8 @@ void main(){
     vTangent = T;
     vBitangent = cross(N, T);
     vCurrClip = uProj * uView * wp;
-    vPrevClip = vCurrClip;
+    vec4 prevWp = aPrevModel * vec4(aPos, 1.0);
+    vPrevClip = (uPrevViewProj[3][3] != 0.0) ? (uPrevViewProj * prevWp) : vCurrClip;
     gl_Position = vCurrClip;
 }
 )";
@@ -861,20 +1231,38 @@ vec3 YCoCgToRGB(vec3 c) {
 
 void main() {
     vec4 current = texture(uCurrentColor, vUV);
+    float depth = texture(uDepth, vUV).r;
 
-    // 3x3 Neighborhood bounding box in YCoCg space
-    vec3 minColor = RGBToYCoCg(current.rgb);
-    vec3 maxColor = minColor;
-
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            vec3 neighbor = RGBToYCoCg(texture(uCurrentColor, vUV + vec2(x, y) * uTexelSize).rgb);
-            minColor = min(minColor, neighbor);
-            maxColor = max(maxColor, neighbor);
-        }
+    // Skybox / infinite background — instant pass-through (no temporal ghosting)
+    if (depth >= 0.9999) {
+        FragColor = current;
+        return;
     }
 
-    float depth = texture(uDepth, vUV).r;
+    // 5-Tap Cross Neighborhood (tighter bound than 3x3 square)
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    vec3 minColor = vec3(1000.0);
+    vec3 maxColor = vec3(-1000.0);
+
+    const vec2 offsets[5] = vec2[](
+        vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)
+    );
+
+    for (int i = 0; i < 5; ++i) {
+        vec3 c = RGBToYCoCg(texture(uCurrentColor, vUV + offsets[i] * uTexelSize).rgb);
+        m1 += c;
+        m2 += c * c;
+        minColor = min(minColor, c);
+        maxColor = max(maxColor, c);
+    }
+
+    vec3 mu = m1 / 5.0;
+    vec3 sigma = sqrt(max(m2 / 5.0 - mu * mu, vec3(0.0)));
+    const float gamma = 1.25; // Standard stable variance box (Unreal / Karis model)
+    vec3 boxMin = max(minColor, mu - gamma * sigma);
+    vec3 boxMax = min(maxColor, mu + gamma * sigma);
+
     vec4 clipPos = vec4(vUV * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
     vec4 worldPos = uInvViewProj * clipPos;
     worldPos /= max(worldPos.w, 1e-5);
@@ -882,8 +1270,7 @@ void main() {
     vec4 prevClipPos = uPrevViewProj * worldPos;
     vec2 prevUV = (prevClipPos.xy / max(prevClipPos.w, 1e-5)) * 0.5 + 0.5;
 
-    // Discard history outside screen boundaries
-    if (prevUV.x < 0.001 || prevUV.x > 0.999 || prevUV.y < 0.001 || prevUV.y > 0.999) {
+    if (prevUV.x < 0.002 || prevUV.x > 0.998 || prevUV.y < 0.002 || prevUV.y > 0.998) {
         FragColor = current;
         return;
     }
@@ -891,22 +1278,23 @@ void main() {
     vec4 history = texture(uHistoryColor, prevUV);
     vec3 historyYCoCg = RGBToYCoCg(history.rgb);
 
-    // Strict clamping to current 3x3 bounding box completely prevents ghosting/smear
-    historyYCoCg = clamp(historyYCoCg, minColor, maxColor);
+    // Variance clipping of history sample to eliminate ghosting trails
+    historyYCoCg = clamp(historyYCoCg, boxMin, boxMax);
     vec3 clampedHistory = YCoCgToRGB(historyYCoCg);
 
-    // Motion-based history rejection: fast camera movement drops history to 0 instantly
+    // Temporal accumulation with stable motion continuity (Unreal Engine Karis model)
+    // Variance clipping already eliminates ghosting trails without collapsing feedback to 0
     float motion = length(prevUV - vUV);
-    float motionFade = clamp(motion * 60.0, 0.0, 1.0);
-    float blend = mix(0.85, 0.0, motionFade);
+    float motionFade = clamp(motion * 8.0, 0.0, 1.0);
 
+    float feedback = clamp(uFeedbackFactor, 0.78, 0.90);
+    float blend = mix(feedback, 0.72, motionFade);
     vec3 finalColor = mix(current.rgb, clampedHistory, blend);
-
     FragColor = vec4(finalColor, 1.0);
 }
 )";
 
-// Screen-Space Reflections (SSR) Ray Marching
+// Screen Space Reflections (SSR)
 inline const char* kSSRFS = R"(
 #version 460 core
 in vec2 vUV;
@@ -938,81 +1326,105 @@ void main() {
 
     vec4 normRough = texture(uNormalRoughnessTex, vUV);
     float roughness = normRough.a;
-    if (roughness > 0.65) {
+    if (roughness > 0.55) {
         FragColor = vec4(0.0);
         return;
     }
 
-    vec3 normal = normalize(normRough.xyz);
-    if (length(normal) < 0.1) {
+    // Decode view-space normal from RGBA16F buffer (already in [-1, 1])
+    vec3 rawNormal = normRough.xyz;
+    if (length(rawNormal) < 0.05) {
         FragColor = vec4(0.0);
         return;
     }
+    vec3 normal = normalize(rawNormal);
 
     vec3 viewPos = getPosition(vUV);
     vec3 viewDir = normalize(viewPos);
-    vec3 reflDir = reflect(viewDir, normal);
+    vec3 reflDir = normalize(reflect(viewDir, normal));
     
-    if (reflDir.z > 0.0) {
+    // If reflection points towards the camera, reject to prevent self-reflection
+    if (reflDir.z > -0.05) {
         FragColor = vec4(0.0);
         return;
     }
 
-    float stepSize = 0.22;
-    vec3 rayPos = viewPos + reflDir * 0.12;
+    float stepSize = 0.16;
+    vec3 rayPos = viewPos + normal * 0.05 + reflDir * 0.10;
     vec3 rayStep = reflDir * stepSize;
     
     vec2 hitUV = vec2(0.0);
     float hitConfidence = 0.0;
     
     for (int i = 0; i < uMaxSteps; ++i) {
+        vec3 prevRayPos = rayPos;
         rayPos += rayStep;
         
         vec4 proj = uProj * vec4(rayPos, 1.0);
         vec2 sampleUV = (proj.xy / max(proj.w, 1e-5)) * 0.5 + 0.5;
         
-        if (sampleUV.x < 0.01 || sampleUV.x > 0.99 || sampleUV.y < 0.01 || sampleUV.y > 0.99) break;
+        if (sampleUV.x < 0.005 || sampleUV.x > 0.995 || sampleUV.y < 0.005 || sampleUV.y > 0.995) break;
         
+        // Avoid self-hit at ray origin
+        if (i < 2 && length(sampleUV - vUV) < 0.012) continue;
+
         float sampleDepth = texture(uDepthTex, sampleUV).r;
+        if (sampleDepth >= 0.9999) {
+            stepSize *= 1.05;
+            rayStep = reflDir * stepSize;
+            continue;
+        }
+        
         vec4 sampleClip = vec4(sampleUV * 2.0 - 1.0, sampleDepth * 2.0 - 1.0, 1.0);
         vec4 sampleViewPos = uInvProj * sampleClip;
         sampleViewPos /= max(sampleViewPos.w, 1e-5);
         
         float depthDiff = rayPos.z - sampleViewPos.z;
-        if (depthDiff <= 0.0 && depthDiff > -uThickness) {
-            // Binary search refinement
-            vec3 refinePos = rayPos - rayStep;
-            vec3 halfStep = rayStep * 0.5;
-            for (int j = 0; j < 5; ++j) {
-                refinePos += halfStep;
-                vec4 rProj = uProj * vec4(refinePos, 1.0);
-                vec2 rUV = (rProj.xy / max(rProj.w, 1e-5)) * 0.5 + 0.5;
-                float rDepth = texture(uDepthTex, rUV).r;
-                vec4 rClip = vec4(rUV * 2.0 - 1.0, rDepth * 2.0 - 1.0, 1.0);
-                vec4 rView = uInvProj * rClip; rView /= max(rView.w, 1e-5);
-                if (refinePos.z - rView.z <= 0.0) {
-                    refinePos -= halfStep;
+        float prevDepthDiff = prevRayPos.z - sampleViewPos.z;
+
+        // Valid intersection condition:
+        // 1. Ray penetrated from front to behind (prevRayPos in front, rayPos behind)
+        // 2. Ray did not penetrate deeper than thickness
+        float dynThickness = max(uThickness, abs(rayStep.z) * 1.5);
+        if (prevDepthDiff >= -0.04 && depthDiff <= 0.0 && depthDiff > -dynThickness) {
+            // 3. Backface rejection: Surface normal must face TOWARDS the reflection ray!
+            vec4 hitNormRough = texture(uNormalRoughnessTex, sampleUV);
+            vec3 hitNormal = hitNormRough.xyz;
+            if (dot(hitNormal, reflDir) < -0.1) {
+                // Binary search refinement
+                vec3 refinePos = rayPos - rayStep;
+                vec3 halfStep = rayStep * 0.5;
+                for (int j = 0; j < 4; ++j) {
+                    refinePos += halfStep;
+                    vec4 rProj = uProj * vec4(refinePos, 1.0);
+                    vec2 rUV = (rProj.xy / max(rProj.w, 1e-5)) * 0.5 + 0.5;
+                    float rDepth = texture(uDepthTex, rUV).r;
+                    vec4 rClip = vec4(rUV * 2.0 - 1.0, rDepth * 2.0 - 1.0, 1.0);
+                    vec4 rView = uInvProj * rClip; rView /= max(rView.w, 1e-5);
+                    if (refinePos.z - rView.z <= 0.0) {
+                        refinePos -= halfStep;
+                    }
+                    halfStep *= 0.5;
                 }
-                halfStep *= 0.5;
+                vec4 finalProj = uProj * vec4(refinePos, 1.0);
+                hitUV = (finalProj.xy / max(finalProj.w, 1e-5)) * 0.5 + 0.5;
+                
+                // Screen edge vignette fade
+                vec2 edge = smoothstep(0.0, 0.12, hitUV) * smoothstep(1.0, 0.88, hitUV);
+                float edgeFade = edge.x * edge.y;
+                
+                // Physically-based Fresnel (Schlick)
+                float NoV = max(dot(-viewDir, normal), 0.0);
+                float fresnel = mix(0.04, 1.0, pow(1.0 - NoV, 5.0));
+                
+                // Smooth roughness fade (only smooth surfaces reflect sharply)
+                float gloss = smoothstep(0.55, 0.05, roughness);
+                
+                hitConfidence = edgeFade * fresnel * gloss;
+                break;
             }
-            vec4 finalProj = uProj * vec4(refinePos, 1.0);
-            hitUV = (finalProj.xy / max(finalProj.w, 1e-5)) * 0.5 + 0.5;
-            
-            // Screen edge vignette fade
-            vec2 edge = smoothstep(0.0, 0.15, hitUV) * smoothstep(1.0, 0.85, hitUV);
-            float edgeFade = edge.x * edge.y;
-            
-            // Fresnel factor (more reflective at grazing angles)
-            float NoV = max(dot(-viewDir, normal), 0.0);
-            float fresnel = pow(1.0 - NoV, 3.0) * 0.85 + 0.15;
-            
-            // Glossiness weight: smooth surfaces have sharp, clear reflections
-            float gloss = (1.0 - roughness * 1.3);
-            
-            hitConfidence = edgeFade * fresnel * clamp(gloss, 0.0, 1.0);
-            break;
         }
-        stepSize *= 1.03;
+        stepSize *= 1.04;
         rayStep = reflDir * stepSize;
     }
     
@@ -1038,7 +1450,9 @@ uniform float uSSRIntensity;
 void main() {
     vec3 scene = texture(uSceneColor, vUV).rgb;
     vec4 ssr = texture(uSSRColor, vUV);
-    vec3 result = scene + ssr.rgb * ssr.a * uSSRIntensity;
+    // Softly compress specular highlights from intense emissive lights
+    vec3 refl = ssr.rgb / (1.0 + ssr.rgb * 0.08);
+    vec3 result = scene + refl * ssr.a * uSSRIntensity;
     FragColor = vec4(result, 1.0);
 }
 )";
@@ -1047,10 +1461,11 @@ void main() {
 inline const char* kGTAOFS = R"(
 #version 460 core
 in vec2 vUV;
-out float FragColor;
+out vec4 FragColor;
 
 uniform sampler2D uDepthTex;
-uniform mat4 uProj;
+uniform sampler2D uNormalTex;
+uniform mat4 uInvProj;
 uniform mat4 uView;
 uniform vec2 uScreenSize;
 uniform float uRadius;
@@ -1058,29 +1473,12 @@ uniform float uIntensity;
 uniform int uDirections;
 uniform int uSteps;
 
-const float PI = 3.14159265;
+const float PI = 3.14159265359;
 
 vec3 reconstructViewPos(vec2 uv, float depth) {
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view = uProj * clip;
-    return view.xyz / view.w;
-}
-
-vec3 reconstructNormal(vec2 uv) {
-    vec2 texel = 1.0 / uScreenSize;
-    float dC = texture(uDepthTex, uv).r;
-    vec3 P = reconstructViewPos(uv, dC);
-    float dR = texture(uDepthTex, uv + vec2(texel.x, 0.0)).r;
-    float dL = texture(uDepthTex, uv - vec2(texel.x, 0.0)).r;
-    float dU = texture(uDepthTex, uv + vec2(0.0, texel.y)).r;
-    float dD = texture(uDepthTex, uv - vec2(0.0, texel.y)).r;
-    vec3 Pr = reconstructViewPos(uv + vec2(texel.x, 0.0), dR);
-    vec3 Pl = reconstructViewPos(uv - vec2(texel.x, 0.0), dL);
-    vec3 Pu = reconstructViewPos(uv + vec2(0.0, texel.y), dU);
-    vec3 Pd = reconstructViewPos(uv - vec2(0.0, texel.y), dD);
-    vec3 dx = (dR > 0.001 && dL > 0.001) ? Pr - Pl : vec3(1.0, 0.0, 0.0);
-    vec3 dy = (dU > 0.001 && dD > 0.001) ? Pu - Pd : vec3(0.0, 1.0, 0.0);
-    return normalize(cross(dx, dy));
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    vec4 view = uInvProj * clip;
+    return view.xyz / max(view.w, 1e-5);
 }
 
 float interleavedGradientNoise(vec2 pixel) {
@@ -1091,71 +1489,95 @@ float interleavedGradientNoise(vec2 pixel) {
 void main() {
     vec2 halfUV = vUV;
     float depth = texture(uDepthTex, halfUV).r;
-    if (depth < 0.0001) { FragColor = 1.0; return; }
+    if (depth >= 0.9999 || depth < 0.0001) {
+        FragColor = vec4(1.0);
+        return;
+    }
 
     vec3 P = reconstructViewPos(halfUV, depth);
-    vec3 N = reconstructNormal(halfUV);
+    vec3 rawNormal = texture(uNormalTex, halfUV).xyz;
+    vec3 N = (length(rawNormal) > 0.05) ? normalize(rawNormal) : vec3(0.0, 0.0, 1.0);
 
     float occlusion = 0.0;
     float randomAngle = interleavedGradientNoise(gl_FragCoord.xy) * 2.0 * PI;
+    
+    // Project world-space radius into screen-space UV coordinates
+    float radiusUV = clamp(uRadius * 0.4 / max(-P.z, 0.5), 0.005, 0.2);
 
     for (int i = 0; i < uDirections; ++i) {
         float angle = (float(i) / float(uDirections)) * PI + randomAngle;
         vec2 direction = vec2(cos(angle), sin(angle));
-        float occluded = 0.0;
-        float total = 0.0;
+        float maxHorizon = 0.0;
 
         for (int j = 1; j <= uSteps; ++j) {
             float t = float(j) / float(uSteps);
-            vec2 sampleUV = halfUV + direction * t * uRadius / uScreenSize;
+            vec2 sampleUV = halfUV + direction * (t * radiusUV);
+            if (sampleUV.x < 0.001 || sampleUV.x > 0.999 || sampleUV.y < 0.001 || sampleUV.y > 0.999) continue;
+
             float sampleDepth = texture(uDepthTex, sampleUV).r;
+            if (sampleDepth >= 0.9999 || sampleDepth < 0.0001) continue;
+
             vec3 S = reconstructViewPos(sampleUV, sampleDepth);
             vec3 horizonVec = S - P;
             float dist = length(horizonVec);
-            if (dist < 0.001) continue;
+            if (dist < 0.05 || dist > uRadius * 2.0) continue;
+
             float cosTheta = dot(normalize(horizonVec), N);
-            float weight = 1.0 - smoothstep(0.0, uRadius, dist);
-            if (cosTheta > 0.0) occluded += cosTheta * weight;
-            total += weight;
+            float falloff = clamp(1.0 - (dist / (uRadius * 2.0)), 0.0, 1.0);
+            
+            // Elevation threshold to reject flat surface false positives
+            if (cosTheta > 0.25) {
+                maxHorizon = max(maxHorizon, (cosTheta - 0.25) * falloff);
+            }
         }
-        if (total > 0.0) occlusion += occluded / total;
+        occlusion += maxHorizon;
     }
 
     occlusion /= float(uDirections);
-    occlusion = 1.0 - occlusion * uIntensity;
-    FragColor = clamp(occlusion, 0.0, 1.0);
+    float ao = clamp(1.0 - occlusion * uIntensity * 1.5, 0.0, 1.0);
+    FragColor = vec4(vec3(ao), 1.0);
 }
 )";
 
 inline const char* kGTAOBlurFS = R"(
 #version 460 core
 in vec2 vUV;
-out float FragColor;
+out vec4 FragColor;
 
 uniform sampler2D uAOTex;
 uniform sampler2D uDepthTex;
 uniform vec2 uScreenSize;
 
 void main() {
+    float centerDepth = texture(uDepthTex, vUV).r;
+    if (centerDepth >= 0.9999 || centerDepth < 0.0001) {
+        FragColor = vec4(1.0);
+        return;
+    }
     vec2 texel = 1.0 / uScreenSize;
     float centerAO = texture(uAOTex, vUV).r;
-    float centerDepth = texture(uDepthTex, vUV).r;
-    float totalAO = 0.0;
-    float totalWeight = 0.0;
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            vec2 off = vec2(float(x), float(y)) * texel;
-            float ao = texture(uAOTex, vUV + off).r;
-            float d = texture(uDepthTex, vUV + off).r;
-            float depthDiff = abs(d - centerDepth);
-            float depthWeight = exp(-depthDiff * 1000.0);
-            float spatialWeight = exp(-0.5 * float(x*x + y*y));
-            float w = depthWeight * spatialWeight;
-            totalAO += ao * w;
-            totalWeight += w;
+    float totalAO = centerAO;
+    float totalWeight = 1.0;
+
+    // Cross-bilateral 5x5 filter with depth & spatial gaussian weights
+    for (int x = -2; x <= 2; ++x) {
+        for (int y = -2; y <= 2; ++y) {
+            if (x == 0 && y == 0) continue;
+            vec2 offset = vec2(float(x), float(y)) * texel;
+            vec2 sampleUV = vUV + offset;
+            if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) continue;
+
+            float d = texture(uDepthTex, sampleUV).r;
+            float spatialWeight = exp(-float(x * x + y * y) * 0.25);
+            float depthWeight = exp(-abs(centerDepth - d) * 300.0);
+            float weight = spatialWeight * depthWeight;
+
+            totalAO += texture(uAOTex, sampleUV).r * weight;
+            totalWeight += weight;
         }
     }
-    FragColor = (totalWeight > 0.0) ? totalAO / totalWeight : centerAO;
+    float finalAO = totalAO / max(totalWeight, 0.0001);
+    FragColor = vec4(vec3(finalAO), 1.0);
 }
 )";
 
@@ -1168,6 +1590,7 @@ uniform sampler2D uAO;
 void main() {
     vec3 hdr = texture(uHDR, vUV).rgb;
     float ao = texture(uAO, vUV).r;
+    ao = clamp(ao, 0.1, 1.0);
     FragColor = vec4(hdr * ao, 1.0);
 }
 )";
@@ -1222,65 +1645,53 @@ float fbm(vec3 p) {
 }
 
 vec3 reconstructWorldPos(vec2 uv, float depth) {
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
     vec4 view = uInvProj * clip;
-    view.xyz /= view.w;
-    vec4 world = uInvView * vec4(view.xyz, 1.0);
+    view /= view.w;
+    vec4 world = uInvView * view;
     return world.xyz;
 }
 
 void main() {
     float depth = texture(uDepthTex, vUV).r;
-    vec3 sceneColor = texture(uSceneTex, vUV).rgb;
-
-    if (depth < 0.0001) {
-        FragColor = vec4(sceneColor, 1.0);
+    if (depth >= 0.9999) {
+        FragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
-
     vec3 worldPos = reconstructWorldPos(vUV, depth);
-    vec3 viewDir = normalize(worldPos - uCameraPos);
-    float distToObj = length(worldPos - uCameraPos);
+    vec3 rayDir = worldPos - uCameraPos;
+    float rayLength = length(rayDir);
+    rayDir /= max(rayLength, 0.001);
 
-    float fogStart = uFogStart;
-    float fogEnd = min(uFogEnd, distToObj);
-
-    if (fogEnd <= fogStart) {
-        FragColor = vec4(sceneColor, 1.0);
+    float startDist = max(0.0, uFogStart);
+    float endDist = min(rayLength, uFogEnd);
+    if (startDist >= endDist) {
+        FragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
+    float stepSize = (endDist - startDist) / float(uStepCount);
     float totalDensity = 0.0;
-    vec3 totalLight = vec3(0.0);
-    int steps = uStepCount;
-    float stepSize = (fogEnd - fogStart) / float(steps);
+    vec3 fogContrib = vec3(0.0);
 
-    for (int i = 0; i < steps; ++i) {
-        float t = fogStart + (float(i) + 0.5) * stepSize;
-        vec3 samplePos = uCameraPos + viewDir * t;
-
-        // Height-based density falloff
-        float heightFactor = exp(-max(samplePos.y - uFogHeight, 0.0) * uFogHeightFalloff);
-
-        // Animated noise for fog variation
-        vec3 noisePos = samplePos * 0.05 + vec3(uTime * 0.1, 0.0, uTime * 0.05);
-        float fogNoise = fbm(noisePos) * 0.6 + 0.4;
-
-        float density = uFogDensity * heightFactor * fogNoise * stepSize;
-        totalDensity += density;
+    for (int i = 0; i < uStepCount; ++i) {
+        float d = startDist + (float(i) + 0.5) * stepSize;
+        vec3 p = uCameraPos + rayDir * d;
+        float h = p.y - uFogHeight;
+        float heightDensity = exp(-max(0.0, h) * uFogHeightFalloff);
+        float n = fbm(p * 0.05 + vec3(0.0, uTime * 0.02, 0.0));
+        float sampleDensity = uFogDensity * heightDensity * (0.8 + 0.4 * n);
+        totalDensity += sampleDensity * stepSize;
+        fogContrib += uFogColor * sampleDensity * stepSize;
     }
 
-    totalDensity = min(totalDensity, 1.0);
-
-    // Fog contribution with height-based tint
-    vec3 fogContrib = uFogColor * (1.0 - exp(-totalDensity));
-
-    vec3 result = mix(sceneColor, uFogColor, totalDensity);
-    FragColor = vec4(result, 1.0);
+    vec3 inScattering = (totalDensity > 1e-4) ? (fogContrib / totalDensity) : uFogColor;
+    float extinction = clamp(1.0 - exp(-totalDensity), 0.0, 1.0);
+    FragColor = vec4(inScattering, extinction);
 }
 )";
 
-// Volumetric fog composite — upsample + apply
+// Volumetric fog composite — upsample + alpha blend
 inline const char* kFogCompositeFS = R"(
 #version 460 core
 in vec2 vUV;
@@ -1290,43 +1701,123 @@ uniform sampler2D uFogTex;
 void main() {
     vec3 scene = texture(uSceneTex, vUV).rgb;
     vec4 fog = texture(uFogTex, vUV);
-    FragColor = vec4(fog.rgb, 1.0);
+    vec3 result = mix(scene, fog.rgb, fog.a);
+    FragColor = vec4(result, 1.0);
 }
 )";
 
-// ---- Light Shafts (God Rays) — screen-space radial blur ----
+// ---- Light Shafts (God Rays) — pure sun occlusion mask + radial blur ----
+inline const char* kSunMaskFS = R"(
+#version 460 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uDepthTex;
+uniform vec2 uSunScreenPos;
+
+void main() {
+    float depth = texture(uDepthTex, vUV).r;
+    if (depth < 0.9999) {
+        // Any foreground geometry blocks the sun completely
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    
+    vec2 toSun = vUV - uSunScreenPos;
+    float dist = length(toSun);
+    float sunDisk = clamp(exp(-dist * 16.0) * 2.5, 0.0, 2.5);
+    FragColor = vec4(vec3(sunDisk), 1.0);
+}
+)";
+
 inline const char* kLightShaftsFS = R"(
 #version 460 core
 in vec2 vUV;
 out vec4 FragColor;
 
-uniform sampler2D uSceneTex;
-uniform vec2 uSunScreenPos; // sun position in screen space [0,1]
+uniform sampler2D uMaskTex;
+uniform vec2 uSunScreenPos;
 uniform float uDensity;
 uniform float uWeight;
 uniform float uDecay;
 uniform float uExposure;
 uniform int uSamples;
 
-void main() {
-    vec2 texCoord = vUV;
-    vec2 deltaTexCoord = (texCoord - uSunScreenPos) * uDensity / float(uSamples);
-    vec3 color = texture(uSceneTex, texCoord).rgb;
+float ditherNoise(vec2 coord) {
+    return fract(sin(dot(coord, vec2(12.9898, 78.233))) * 43758.5453);
+}
 
+void main() {
+    vec2 deltaTexCoord = (vUV - uSunScreenPos) * uDensity / float(uSamples);
     vec3 illumination = vec3(0.0);
     float illuminationDecay = 1.0;
 
-    vec2 sampleCoord = texCoord;
+    float jitter = ditherNoise(gl_FragCoord.xy);
+    vec2 sampleCoord = vUV - deltaTexCoord * jitter;
+
     for (int i = 0; i < uSamples; ++i) {
         sampleCoord -= deltaTexCoord;
-        vec3 sampleColor = texture(uSceneTex, sampleCoord).rgb;
-        sampleColor *= illuminationDecay * uWeight;
-        illumination += sampleColor;
+        if (sampleCoord.x >= 0.0 && sampleCoord.x <= 1.0 && sampleCoord.y >= 0.0 && sampleCoord.y <= 1.0) {
+            vec3 sampleColor = texture(uMaskTex, sampleCoord).rgb;
+            illumination += sampleColor * illuminationDecay * uWeight;
+        }
         illuminationDecay *= uDecay;
     }
 
     vec3 godRays = illumination * uExposure;
-    FragColor = vec4(color + godRays, 1.0);
+    FragColor = vec4(godRays, 1.0);
+}
+)";
+
+inline const char* kLightShaftsCompositeFS = R"(
+#version 460 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uSceneTex;
+uniform sampler2D uShaftsTex;
+uniform vec3 uSunColor;
+void main() {
+    vec3 scene = texture(uSceneTex, vUV).rgb;
+    vec3 shafts = texture(uShaftsTex, vUV).rgb;
+    FragColor = vec4(scene + shafts * uSunColor * 1.8, 1.0);
+}
+)";
+
+// Radial Speed Motion Blur & Chromatic Aberration (AAA Racing / NFS Speed Feel)
+inline const char* kRadialSpeedBlurFS = R"(
+#version 460 core
+in vec2 vUV;
+out vec4 FragColor;
+
+uniform sampler2D uSceneTex;
+uniform vec2 uCenter;
+uniform float uBlurStrength;
+uniform float uChromaticAberration;
+
+void main() {
+    if (uBlurStrength <= 0.001) {
+        FragColor = texture(uSceneTex, vUV);
+        return;
+    }
+
+    vec2 dir = vUV - uCenter;
+    float dist = length(dir);
+    float blurFactor = dist * uBlurStrength * 0.07;
+
+    const int SAMPLES = 8;
+    vec3 colorAccum = vec3(0.0);
+
+    for (int i = 0; i < SAMPLES; ++i) {
+        float scale = 1.0 - blurFactor * (float(i) / float(SAMPLES - 1));
+        vec2 sampleUV = uCenter + dir * scale;
+
+        float r = texture(uSceneTex, sampleUV + dir * (uChromaticAberration * dist)).r;
+        float g = texture(uSceneTex, sampleUV).g;
+        float b = texture(uSceneTex, sampleUV - dir * (uChromaticAberration * dist)).b;
+
+        colorAccum += vec3(r, g, b);
+    }
+
+    FragColor = vec4(colorAccum / float(SAMPLES), 1.0);
 }
 )";
 

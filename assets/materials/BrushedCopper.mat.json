@@ -14,6 +14,6 @@
     0.0
   ],
   "diffuseMap": "",
-  "normalMap": "",
+  "normalMap": "assets/textures/pbr/brushed_metal_normal.png",
   "specularMap": ""
 }

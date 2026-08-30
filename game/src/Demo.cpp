@@ -211,17 +211,26 @@ void Demo::spawnPlayer() {
     m_playerModel = pModel.id();
 
     // Vehicles: sports car near player, police and taxi as AI traffic
-    m_vehicles.push_back(std::make_unique<Physics::Vehicle>(
+    auto car1 = std::make_unique<Physics::Vehicle>(
         scene(), glm::vec3{-3.5f, 0.0f, -198.0f}, 0.0f,
-        "assets/models/cars/sedan-sports.obj", 20.0f));
+        "assets/models/cars/sedan-sports.obj", 20.0f,
+        "assets/models/cars/wheel.obj", "assets/textures/colormap.png");
+    car1->setBounds(true, {-7.5f, 7.5f}, {-245.0f, 245.0f});
+    m_vehicles.push_back(std::move(car1));
 
-    m_vehicles.push_back(std::make_unique<Physics::Vehicle>(
+    auto car2 = std::make_unique<Physics::Vehicle>(
         scene(), glm::vec3{3.5f, 0.0f, -10.0f}, 180.0f,
-        "assets/models/cars/police.obj", 7.5f));
+        "assets/models/cars/police.obj", 7.5f,
+        "assets/models/cars/wheel.obj", "assets/textures/colormap.png");
+    car2->setBounds(true, {-7.5f, 7.5f}, {-245.0f, 245.0f});
+    m_vehicles.push_back(std::move(car2));
 
-    m_vehicles.push_back(std::make_unique<Physics::Vehicle>(
+    auto car3 = std::make_unique<Physics::Vehicle>(
         scene(), glm::vec3{-3.5f, 0.0f, 120.0f}, 0.0f,
-        "assets/models/cars/taxi.obj", 7.0f));
+        "assets/models/cars/taxi.obj", 7.0f,
+        "assets/models/cars/wheel.obj", "assets/textures/colormap.png");
+    car3->setBounds(true, {-7.5f, 7.5f}, {-245.0f, 245.0f});
+    m_vehicles.push_back(std::move(car3));
 
     // Camera: yaw=90 -> looking along +Z (forward on highway)
     m_camYaw = 90.0f;

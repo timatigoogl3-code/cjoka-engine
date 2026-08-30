@@ -31,6 +31,10 @@ Window::Window(int width, int height, const char* title)
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     // sRGB framebuffer если hdr pipeline не активен — оставляем linear для HDR
     // glEnable(GL_FRAMEBUFFER_SRGB); // HDR сам делает гамму
+
+    glfwSetWindowCloseCallback(m_window, [](GLFWwindow*) {
+        std::cout << "[Window] GLFW window close requested (close button or WM signal)!\n";
+    });
 }
 
 Window::~Window() {
@@ -41,7 +45,10 @@ Window::~Window() {
 }
 
 bool Window::shouldClose() const { return glfwWindowShouldClose(m_window); }
-void Window::setShouldClose(bool v) const { glfwSetWindowShouldClose(m_window, v); }
+void Window::setShouldClose(bool v) const {
+    std::cout << "[Window] setShouldClose(" << v << ") called!\n";
+    glfwSetWindowShouldClose(m_window, v);
+}
 void Window::pollEvents() const { glfwPollEvents(); }
 void Window::swapBuffers() const { glfwSwapBuffers(m_window); }
 void Window::getFramebufferSize(int& w, int& h) const { glfwGetFramebufferSize(m_window, &w, &h); }

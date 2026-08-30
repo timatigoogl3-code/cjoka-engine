@@ -116,16 +116,56 @@ Mesh3D Mesh3D::Quad(float s) {
 }
 Mesh3D Mesh3D::Cube(float s) {
     float h=s*0.5f; std::vector<Vertex> v; v.reserve(24);
-    auto push=[&](glm::vec3 p0,glm::vec3 p1,glm::vec3 p2,glm::vec3 p3,glm::vec3 n,glm::vec3 c){
-        v.push_back({p0,c,n,{0,0}}); v.push_back({p1,c,n,{1,0}}); v.push_back({p2,c,n,{1,1}}); v.push_back({p3,c,n,{0,1}});
+    auto push=[&](glm::vec3 p0,glm::vec3 p1,glm::vec3 p2,glm::vec3 p3,glm::vec3 n){
+        v.push_back({p0,{1.0f,1.0f,1.0f},n,{0,0}}); v.push_back({p1,{1.0f,1.0f,1.0f},n,{1,0}}); v.push_back({p2,{1.0f,1.0f,1.0f},n,{1,1}}); v.push_back({p3,{1.0f,1.0f,1.0f},n,{0,1}});
     };
-    push({h,-h,-h},{h,h,-h},{h,h,h},{h,-h,h},{1,0,0},{1,0.3f,0.3f});
-    push({-h,-h,h},{-h,h,h},{-h,h,-h},{-h,-h,-h},{-1,0,0},{0.3f,1,0.3f});
-    push({-h,h,-h},{-h,h,h},{h,h,h},{h,h,-h},{0,1,0},{0.3f,0.3f,1});
-    push({-h,-h,h},{-h,-h,-h},{h,-h,-h},{h,-h,h},{0,-1,0},{1,1,0.3f});
-    push({-h,-h,h},{h,-h,h},{h,h,h},{-h,h,h},{0,0,1},{1,0.3f,1});
-    push({h,-h,-h},{-h,-h,-h},{-h,h,-h},{h,h,-h},{0,0,-1},{0.3f,1,1});
+    push({h,-h,-h},{h,h,-h},{h,h,h},{h,-h,h},{1,0,0});
+    push({-h,-h,h},{-h,h,h},{-h,h,-h},{-h,-h,-h},{-1,0,0});
+    push({-h,h,-h},{-h,h,h},{h,h,h},{h,h,-h},{0,1,0});
+    push({-h,-h,h},{-h,-h,-h},{h,-h,-h},{h,-h,h},{0,-1,0});
+    push({-h,-h,h},{h,-h,h},{h,h,h},{-h,h,h},{0,0,1});
+    push({h,-h,-h},{-h,-h,-h},{-h,h,-h},{h,h,-h},{0,0,-1});
     std::vector<uint32_t> idx; idx.reserve(36);
     for(uint32_t f=0;f<6;++f){uint32_t o=f*4; idx.insert(idx.end(),{o,o+1,o+2,o+2,o+3,o});}
+    return Mesh3D(std::move(v), std::move(idx));
+}
+
+Mesh3D Mesh3D::Plane(float width, float depth, int gridX, int gridZ, float uvTileX, float uvTileZ) {
+    gridX = std::max(1, gridX);
+    gridZ = std::max(1, gridZ);
+    std::vector<Vertex> v;
+    v.reserve((gridX + 1) * (gridZ + 1));
+    std::vector<uint32_t> idx;
+    idx.reserve(gridX * gridZ * 6);
+
+    float halfW = width * 0.5f;
+    float halfD = depth * 0.5f;
+
+    for (int z = 0; z <= gridZ; ++z) {
+        float fz = (float)z / (float)gridZ;
+        float posZ = -halfD + fz * depth;
+        for (int x = 0; x <= gridX; ++x) {
+            float fx = (float)x / (float)gridX;
+            float posX = -halfW + fx * width;
+            glm::vec3 pos{posX, 0.0f, posZ};
+            glm::vec3 norm{0.0f, 1.0f, 0.0f};
+            glm::vec2 uv{fx, 1.0f - fz};
+            v.push_back({pos, {1.0f, 1.0f, 1.0f}, norm, uv});
+        }
+    }
+
+    for (int z = 0; z < gridZ; ++z) {
+        for (int x = 0; x < gridX; ++x) {
+            uint32_t row1 = (uint32_t)(z * (gridX + 1) + x);
+            uint32_t row2 = (uint32_t)((z + 1) * (gridX + 1) + x);
+            idx.push_back(row1);
+            idx.push_back(row2);
+            idx.push_back(row1 + 1);
+
+            idx.push_back(row1 + 1);
+            idx.push_back(row2);
+            idx.push_back(row2 + 1);
+        }
+    }
     return Mesh3D(std::move(v), std::move(idx));
 }

@@ -34,4 +34,6 @@ private:
     std::vector<glm::mat4> m_lightMatrices;
     GLint m_prevFbo = 0;
     GLint m_prevViewport[4] = {0, 0, 0, 0};
+    GLboolean m_prevCullFace = GL_FALSE;
+    GLint m_prevCullMode = GL_BACK;
 };

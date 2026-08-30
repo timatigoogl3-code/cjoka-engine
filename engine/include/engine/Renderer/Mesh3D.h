@@ -51,6 +51,7 @@ public:
     static Mesh3D Triangle(glm::vec3 c0={1,0.2f,0.2f}, glm::vec3 c1={0.2f,1,0.2f}, glm::vec3 c2={0.2f,0.2f,1});
     static Mesh3D Quad(float size = 1.0f);
     static Mesh3D Cube(float size = 1.0f);
+    static Mesh3D Plane(float width = 10.0f, float depth = 10.0f, int gridX = 10, int gridZ = 10, float uvTileX = 1.0f, float uvTileZ = 1.0f);
 
 private:
     void setup();

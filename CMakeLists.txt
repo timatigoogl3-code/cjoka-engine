@@ -22,6 +22,11 @@ endif()
 message(STATUS "C:   ${CMAKE_C_COMPILER}")
 message(STATUS "CXX: ${CMAKE_CXX_COMPILER} (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
 
+# ---------- Модульные подсистемы (Strip & Modularize) ----------
+option(CJOKA_ENABLE_PHYSX "Enable NVIDIA PhysX 5.5 physics subsystem" ON)
+option(CJOKA_ENABLE_AUDIO "Enable miniaudio 3D spatial sound engine" ON)
+option(CJOKA_ENABLE_FBX "Enable ufbx FBX 3D models and skeletal animation" ON)
+
 # ---------- Модули ----------
 add_subdirectory(engine)
 add_subdirectory(game)

@@ -13,6 +13,11 @@
 #include "engine/Math/Frustum.h"
 #include "engine/Renderer/ForwardPlus.h"
 #include "engine/Renderer/Decal.h"
+#include "engine/Gameplay/TriggerZone.h"
+#include "engine/Renderer/VXGI.h"
+#include "engine/Renderer/LightProbeGrid.h"
+#include "engine/Environment/WorldEnvironment.h"
+#include "engine/Core/Profiler.h"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -83,6 +88,7 @@ inline void AnimationUpdate(Registry& reg, float dt) {
 }
 
 inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, CascadedShadowMap* shadow = nullptr, float screenW = 1280.0f, float screenH = 720.0f, const glm::mat4& prevViewProj = glm::mat4(1.0f)) {
+    (void)shader;
     // --- Instanced cluster shader (lazy init) ---
     static Shader* clusterShader = nullptr;
     if (!clusterShader) clusterShader = new Shader(DefaultShaders::kClusterInstancedVS, DefaultShaders::kLitFS);
@@ -136,11 +142,11 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
 
         sh.setBool("uHasShadow", shadow && shadow->ready());
         if (shadow && shadow->ready()) {
-            shadow->bind(2);
-            sh.setInt("uShadowMapArray", 2);
+            shadow->bind(3);
+            sh.setInt("uShadowMapArray", 3);
             const auto& splits = shadow->cascadeSplits();
             const auto& matrices = shadow->lightMatrices();
-            for (int i = 0; i < 3; ++i) {
+            for (size_t i = 0; i < 3 && i < matrices.size(); ++i) {
                 std::string name = "uLightMatrices[" + std::to_string(i) + "]";
                 sh.setMat4(name.c_str(), matrices[i]);
             }
@@ -148,6 +154,25 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
                 std::string name = "uCascadeSplits[" + std::to_string(i) + "]";
                 sh.setFloat(name.c_str(), splits[i]);
             }
+        }
+
+        // VXGI Voxel Cone Tracing
+        auto& vxgi = cjoka::VXGI::Get();
+        sh.setBool("uUseVXGI", vxgi.enabled());
+        if (vxgi.enabled()) {
+            vxgi.bindVoxelTexture(7);
+            sh.setInt("uVoxelGrid", 7);
+            sh.setVec3("uVoxelCenter", vxgi.gridCenter());
+            sh.setFloat("uVoxelExtent", vxgi.gridExtent());
+            sh.setFloat("uVXGIIntensity", vxgi.giIntensity());
+        }
+
+        // Light Probe Grid (Baked Mixed GI)
+        auto& probes = cjoka::LightProbeGrid::Get();
+        sh.setBool("uUseLightProbes", probes.enabled());
+        sh.setFloat("uLightProbeIntensity", probes.intensity());
+        if (probes.enabled()) {
+            probes.bindSSBO(6);
         }
     };
 
@@ -216,6 +241,7 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
         clusterShader->use();
         clusterShader->setMat4("uView", view);
         clusterShader->setMat4("uProj", proj);
+        clusterShader->setMat4("uPrevViewProj", prevViewProj);
 
         for (auto& [mesh, grp] : clusterGroups) {
             const Material& mat = *grp.material;
@@ -223,7 +249,10 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
             clusterShader->setFloat("uMetallic", mat.metallic);
             clusterShader->setFloat("uRoughness", mat.roughness <= 0.02f ? 0.5f : mat.roughness);
             clusterShader->setFloat("uAO", mat.ao);
+            float effectiveWetness = std::max(mat.wetness, cjoka::WorldEnvironment::Get().groundWetness);
+            clusterShader->setFloat("uWetness", effectiveWetness);
             clusterShader->setVec3("uEmissive", mat.emissive);
+            clusterShader->setVec2("uUVTiling", mat.uvTiling);
             if (mat.useDiffuseMap && mat.diffuseMap && mat.diffuseMap->valid()) {
                 clusterShader->setBool("uUseDiffuseMap", true);
                 mat.diffuseMap->bind(0); clusterShader->setInt("uDiffuseMap", 0);
@@ -231,14 +260,27 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
             if (mat.useNormalMap && mat.normalMap && mat.normalMap->valid()) {
                 clusterShader->setBool("uUseNormalMap", true);
                 mat.normalMap->bind(2); clusterShader->setInt("uNormalMap", 2);
+                clusterShader->setFloat("uNormalScale", mat.normalStrength);
             } else clusterShader->setBool("uUseNormalMap", false);
             if (mat.useSpecularMap && mat.specularMap && mat.specularMap->valid()) {
                 clusterShader->setBool("uUseSpecularMap", true);
                 mat.specularMap->bind(1); clusterShader->setInt("uSpecularMap", 1);
             } else clusterShader->setBool("uUseSpecularMap", false);
 
-            mesh->DrawInstanced(grp.instances.data(), (int)grp.instances.size(),
+            if (mat.twoSided) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
+            int drawn = mesh->DrawInstanced(grp.instances.data(), (int)grp.instances.size(),
                                 viewPos, vp, fovYrad, screenH, cluster_lod::thresholdPx);
+            glEnable(GL_CULL_FACE);
+            auto& pStats = cjoka::Profiler::Get().stats();
+            pStats.totalDrawCalls += (drawn > 0 ? 1u : 0u);
+            pStats.clusterDrawCalls += (drawn > 0 ? 1u : 0u);
+            pStats.drawnClusters += static_cast<uint32_t>(drawn > 0 ? drawn : 0);
+            size_t lod0Tris = mesh->totalTrisLod0() * grp.instances.size();
+            pStats.clusterTrianglesLod0 += static_cast<uint32_t>(lod0Tris);
+            pStats.totalTriangles += static_cast<uint32_t>((drawn > 0 ? drawn : 0) * 128);
+            if (drawn > 0 && lod0Tris > static_cast<size_t>(drawn * 128)) {
+                pStats.savedClusterTriangles += static_cast<uint32_t>(lod0Tris - static_cast<size_t>(drawn * 128));
+            }
         }
     }
 
@@ -288,37 +330,127 @@ inline void RenderLit(Registry& reg, const Shader& shader, const glm::mat4& view
             }
 
             smr.mesh->draw();
+            auto& pStats = cjoka::Profiler::Get().stats();
+            pStats.totalDrawCalls++;
+            pStats.totalTriangles += static_cast<uint32_t>(smr.mesh->indices().size() / 3);
         }
     }
 
-    // 3. Regular non-cluster meshes
+    // 3. Regular non-cluster meshes (Batched & Instanced in 1 Draw Call per shared mesh)
     if (!nonClusterEntities.empty()) {
-        setupLighting(shader);
-        shader.use();
-        shader.setMat4("uView", view); shader.setMat4("uProj", proj);
+        struct MeshBatchKey {
+            Mesh3D* mesh = nullptr;
+            GLuint diffuse = 0;
+            GLuint normal = 0;
+            GLuint specular = 0;
+            int uvTilingX = 100;
+            int uvTilingY = 100;
+            int aoInt = 100;
+            int normalStrengthInt = 100;
+            int wetnessInt = 0;
+            bool twoSided = false;
+
+            bool operator==(const MeshBatchKey& o) const {
+                return mesh == o.mesh && diffuse == o.diffuse && normal == o.normal && specular == o.specular &&
+                       uvTilingX == o.uvTilingX && uvTilingY == o.uvTilingY &&
+                       aoInt == o.aoInt && normalStrengthInt == o.normalStrengthInt &&
+                       wetnessInt == o.wetnessInt && twoSided == o.twoSided;
+            }
+        };
+        struct MeshBatchKeyHash {
+            size_t operator()(const MeshBatchKey& k) const noexcept {
+                size_t h = std::hash<void*>{}(k.mesh);
+                h = (h * 397) ^ (std::hash<GLuint>{}(k.diffuse) << 1);
+                h = (h * 397) ^ (std::hash<GLuint>{}(k.normal) << 2);
+                h = (h * 397) ^ (std::hash<GLuint>{}(k.specular) << 3);
+                h = (h * 397) ^ (static_cast<size_t>(k.uvTilingX) << 4);
+                h = (h * 397) ^ (static_cast<size_t>(k.uvTilingY) << 5);
+                h = (h * 397) ^ (static_cast<size_t>(k.aoInt) << 6);
+                h = (h * 397) ^ (static_cast<size_t>(k.normalStrengthInt) << 7);
+                h = (h * 397) ^ (static_cast<size_t>(k.wetnessInt) << 8);
+                h = (h * 397) ^ (static_cast<size_t>(k.twoSided ? 1 : 0) << 9);
+                return h;
+            }
+        };
+        struct MeshBatch {
+            Mesh3D* mesh = nullptr;
+            Material material;
+            std::vector<InstanceData> instances;
+        };
+
+        std::unordered_map<MeshBatchKey, MeshBatch, MeshBatchKeyHash> instancedBatches;
+
         for (Entity e : nonClusterEntities) {
             auto& tr = reg.get<Transform>(e);
             auto& mr = reg.get<MeshRenderer>(e);
-            glm::mat4 model = tr.matrix();
-            shader.setMat4("uMVP", proj * view * model);
-            shader.setMat4("uModel", model);
-            shader.setMat3("uNormalMat", glm::inverseTranspose(glm::mat3(model)));
-            shader.setMat4("uPrevModel", tr.prevMatrix);
-            shader.setVec3("uAlbedo", mr.material.albedo);
-            shader.setFloat("uMetallic", mr.material.metallic);
-            shader.setFloat("uRoughness", std::max(mr.material.roughness, 0.04f));
-            shader.setFloat("uAO", mr.material.ao);
-            shader.setVec3("uEmissive", mr.material.emissive);
-            if (mr.material.useDiffuseMap && mr.material.diffuseMap && mr.material.diffuseMap->valid()) {
-                shader.setBool("uUseDiffuseMap", true); mr.material.diffuseMap->bind(0); shader.setInt("uDiffuseMap", 0);
-            } else shader.setBool("uUseDiffuseMap", false);
-            if (mr.material.useNormalMap && mr.material.normalMap && mr.material.normalMap->valid()) {
-                shader.setBool("uUseNormalMap", true); mr.material.normalMap->bind(2); shader.setInt("uNormalMap", 2);
-            } else shader.setBool("uUseNormalMap", false);
-            if (mr.material.useSpecularMap && mr.material.specularMap && mr.material.specularMap->valid()) {
-                shader.setBool("uUseSpecularMap", true); mr.material.specularMap->bind(1); shader.setInt("uSpecularMap", 1);
-            } else shader.setBool("uUseSpecularMap", false);
-            mr.mesh->draw();
+            if (!mr.mesh || mr.mesh->empty()) continue;
+
+            GLuint diffId = (mr.material.useDiffuseMap && mr.material.diffuseMap && mr.material.diffuseMap->valid()) ? mr.material.diffuseMap->id() : 0;
+            GLuint normId = (mr.material.useNormalMap && mr.material.normalMap && mr.material.normalMap->valid()) ? mr.material.normalMap->id() : 0;
+            GLuint specId = (mr.material.useSpecularMap && mr.material.specularMap && mr.material.specularMap->valid()) ? mr.material.specularMap->id() : 0;
+
+            int uvX = static_cast<int>(std::round(mr.material.uvTiling.x * 100.0f));
+            int uvY = static_cast<int>(std::round(mr.material.uvTiling.y * 100.0f));
+            int aoI = static_cast<int>(std::round(mr.material.ao * 100.0f));
+            int normStr = static_cast<int>(std::round(mr.material.normalStrength * 100.0f));
+            int wetI = static_cast<int>(std::round(mr.material.wetness * 100.0f));
+
+            MeshBatchKey key{mr.mesh.get(), diffId, normId, specId, uvX, uvY, aoI, normStr, wetI, mr.material.twoSided};
+            auto& b = instancedBatches[key];
+            if (!b.mesh) {
+                b.mesh = mr.mesh.get();
+                b.material = mr.material;
+            }
+            InstanceData inst;
+            inst.model = tr.matrix();
+            inst.prevModel = tr.prevMatrix;
+            inst.albedo = glm::vec4(mr.material.albedo, mr.material.roughness);
+            inst.emissive = glm::vec4(mr.material.emissive, mr.material.metallic);
+            b.instances.push_back(inst);
+        }
+
+        static Shader* instancedLitShader = nullptr;
+        if (!instancedLitShader) instancedLitShader = new Shader(DefaultShaders::kLitInstancedVS, DefaultShaders::kLitInstancedFS);
+
+        setupLighting(*instancedLitShader);
+        instancedLitShader->use();
+        instancedLitShader->setMat4("uView", view);
+        instancedLitShader->setMat4("uProj", proj);
+
+        for (auto& [key, batch] : instancedBatches) {
+            if (batch.instances.empty()) continue;
+            const Material& mat = batch.material;
+            float effectiveWetness = std::max(mat.wetness, cjoka::WorldEnvironment::Get().groundWetness);
+            instancedLitShader->setFloat("uAO", mat.ao);
+            instancedLitShader->setFloat("uWetness", effectiveWetness);
+            instancedLitShader->setVec2("uUVTiling", mat.uvTiling);
+            if (mat.useDiffuseMap && mat.diffuseMap && mat.diffuseMap->valid()) {
+                instancedLitShader->setBool("uUseDiffuseMap", true);
+                mat.diffuseMap->bind(0);
+                instancedLitShader->setInt("uDiffuseMap", 0);
+            } else instancedLitShader->setBool("uUseDiffuseMap", false);
+
+            if (mat.useNormalMap && mat.normalMap && mat.normalMap->valid()) {
+                instancedLitShader->setBool("uUseNormalMap", true);
+                mat.normalMap->bind(2);
+                instancedLitShader->setInt("uNormalMap", 2);
+                instancedLitShader->setFloat("uNormalScale", mat.normalStrength);
+            } else instancedLitShader->setBool("uUseNormalMap", false);
+
+            if (mat.useSpecularMap && mat.specularMap && mat.specularMap->valid()) {
+                instancedLitShader->setBool("uUseSpecularMap", true);
+                mat.specularMap->bind(1);
+                instancedLitShader->setInt("uSpecularMap", 1);
+            } else instancedLitShader->setBool("uUseSpecularMap", false);
+
+            if (mat.twoSided) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
+            batch.mesh->drawInstanced(batch.instances.data(), batch.instances.size());
+            glEnable(GL_CULL_FACE);
+            
+            auto& pStats = cjoka::Profiler::Get().stats();
+            pStats.totalDrawCalls++;
+            pStats.instancedDrawCalls++;
+            pStats.totalTriangles += static_cast<uint32_t>((batch.mesh->indices().size() / 3) * batch.instances.size());
         }
     }
 }
@@ -445,30 +577,47 @@ inline void RenderWithCamera(Registry& reg, const Shader& shader, const Window& 
     // --- CASCADED SHADOW PASS ---
     bool shadowOn = false;
     if (auto v = reg.view<DirectionalLight>(); v.begin() != v.end()) {
+        CJOKA_PROFILE_GPU("Cascaded Shadows (CSM)");
         auto& sun = reg.get<DirectionalLight>(*v.begin());
         auto& csm = GlobalShadow();
         auto matrices = csm.calculateLightMatrices(view, proj, sun.direction);
 
-        static int shadowFrame = 0;
-        if (++shadowFrame >= nanite::shadowEveryNFrames) {
-            shadowFrame = 0;
-            for (int c = 0; c < CascadedShadowMap::CASCADE_COUNT; ++c) {
-                csm.beginCascade(c, matrices[c]);
-                RenderShadowPass(reg, matrices[c]);
-            }
-            csm.end();
+        for (size_t c = 0; c < CascadedShadowMap::CASCADE_COUNT && c < matrices.size(); ++c) {
+            csm.beginCascade(static_cast<int>(c), matrices[c]);
+            RenderShadowPass(reg, matrices[c]);
         }
+        csm.end();
         shadowOn = csm.ready();
     }
 
-    DrawSky(view, proj, skyPtr);
+    // --- VXGI SCENE VOXELIZATION PASS ---
+    auto& vxgi = cjoka::VXGI::Get();
+    if (vxgi.enabled()) {
+        CJOKA_PROFILE_GPU("VXGI Voxelization");
+        const DirectionalLight* sunPtr = nullptr;
+        if (auto v = reg.view<DirectionalLight>(); v.begin() != v.end()) {
+            sunPtr = &reg.get<DirectionalLight>(*v.begin());
+        }
+        vxgi.voxelizeScene(reg, viewPos, sunPtr, w, h);
+    }
 
-    bool hasLight = reg.count<DirectionalLight>()>0 || reg.count<PointLight>()>0;
-    if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr, (float)w, (float)h, prevViewProj);
-    else RenderUnlit(reg, shader, view, proj, viewPos);
+    {
+        CJOKA_PROFILE_GPU("Sky Pass");
+        DrawSky(view, proj, skyPtr);
+    }
+
+    {
+        CJOKA_PROFILE_GPU("Opaque Geometry & Nanite LOD");
+        bool hasLight = reg.count<DirectionalLight>()>0 || reg.count<PointLight>()>0;
+        if (hasLight) RenderLit(reg, shader, view, proj, viewPos, shadowOn ? &GlobalShadow() : nullptr, (float)w, (float)h, prevViewProj);
+        else RenderUnlit(reg, shader, view, proj, viewPos);
+    }
 
     // Декали поверх геометрии сцены
-    Renderer::DecalSystem::Render(reg, view, proj, 0);
+    {
+        CJOKA_PROFILE_GPU("Decals Pass");
+        Renderer::DecalSystem::Render(reg, view, proj, 0);
+    }
 
     // Update prevMatrix for all transforms (motion vectors for next frame)
     for (Entity e : reg.view<Transform>()) {
@@ -518,6 +667,71 @@ inline void FlyCameraSystem(Registry& reg, Window& win, float dt) {
         lastX=x; lastY=y; tr.rotation.y+=dx*0.12f; tr.rotation.x-=dy*0.12f;
         tr.rotation.x=glm::clamp(tr.rotation.x,-89.0f,89.0f);
     } else if(grabbing){grabbing=false; win.setCursorMode(GLFW_CURSOR_NORMAL); lastX=0;}
+}
+
+// ------------------------------------------------------------------
+// SpringArmSystem — UE4 USpringArmComponent smooth camera boom
+// ------------------------------------------------------------------
+inline void UpdateSpringArms(Registry& reg, float dt) {
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
+
+    for (Entity armEnt : reg.view<SpringArmComponent, Transform>()) {
+        auto& arm = reg.get<SpringArmComponent>(armEnt);
+        auto& armTr = reg.get<Transform>(armEnt);
+
+        // Find target
+        Entity targetEnt = arm.target;
+        if (targetEnt == NullEntity || !reg.valid(targetEnt) || !reg.has<Transform>(targetEnt)) {
+            for (Entity e : reg.view<Transform>()) {
+                if (e != armEnt) { targetEnt = e; break; }
+            }
+        }
+        if (targetEnt == NullEntity || !reg.valid(targetEnt) || !reg.has<Transform>(targetEnt)) continue;
+
+        const auto& targetTr = reg.get<Transform>(targetEnt);
+
+        // Compute desired boom rotation & position
+        float targetYawRad = glm::radians(targetTr.rotation.y);
+        glm::vec3 fwd(std::sin(targetYawRad), 0.0f, std::cos(targetYawRad));
+        glm::vec3 right(fwd.z, 0.0f, -fwd.x);
+        glm::vec3 up(0.0f, 1.0f, 0.0f);
+
+        glm::vec3 targetAnchor = targetTr.position + up * arm.targetOffset.y + right * arm.targetOffset.x + fwd * arm.targetOffset.z;
+        glm::vec3 desiredPos = targetAnchor - fwd * arm.targetArmLength + up * arm.socketOffset.y + right * arm.socketOffset.x;
+
+        if (!arm.initialized) {
+            arm.currentPosition = desiredPos;
+            arm.currentRotation = targetTr.rotation;
+            arm.initialized = true;
+        }
+
+        // Camera Lag (smooth spring-damper lerp)
+        if (arm.enableCameraLag) {
+            float lagFactor = std::clamp(arm.cameraLagSpeed * dt, 0.0f, 1.0f);
+            arm.currentPosition = glm::mix(arm.currentPosition, desiredPos, lagFactor);
+        } else {
+            arm.currentPosition = desiredPos;
+        }
+
+        if (arm.enableCameraRotationLag) {
+            float rotFactor = std::clamp(arm.cameraRotationLagSpeed * dt, 0.0f, 1.0f);
+            arm.currentRotation = glm::mix(arm.currentRotation, targetTr.rotation, rotFactor);
+        } else {
+            arm.currentRotation = targetTr.rotation;
+        }
+
+        armTr.position = arm.currentPosition;
+        armTr.rotation = arm.currentRotation;
+
+        // If this entity also has a Camera, orient it toward targetAnchor
+        if (reg.has<Camera>(armEnt)) {
+            glm::vec3 dir = glm::normalize(targetAnchor - armTr.position);
+            float pitch = glm::degrees(std::asin(dir.y));
+            float yaw = glm::degrees(std::atan2(dir.x, dir.z));
+            armTr.rotation.x = pitch;
+            armTr.rotation.y = yaw;
+        }
+    }
 }
 
 } // namespace Systems

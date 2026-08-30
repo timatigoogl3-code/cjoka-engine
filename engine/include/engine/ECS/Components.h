@@ -11,6 +11,14 @@
 
 #include "engine/ECS/Registry.h"
 
+// ---------- Tag ----------
+struct Tag {
+    std::string tag = "Untagged";
+    Tag() = default;
+    Tag(std::string t) : tag(std::move(t)) {}
+};
+using TagComponent = Tag;
+
 // ---------- Transform ----------
 struct Transform {
     glm::vec3 position{0.0f};
@@ -74,6 +82,9 @@ struct Material {
     float metallic = 0.0f;
     float roughness = 0.5f;
     float ao = 1.0f;
+    float wetness = 0.0f; // 0.0 = dry, 1.0 = wet puddle reflections
+    float normalStrength = 1.0f;
+    glm::vec2 uvTiling{1.0f, 1.0f};
     float shininess = 32.0f; // legacy Phong compatibility
     glm::vec3 emissive{0.0f};
 
@@ -84,6 +95,7 @@ struct Material {
     bool useDiffuseMap = false;
     bool useSpecularMap = false;
     bool useNormalMap = false;
+    bool twoSided = false;
 
     std::string materialPath = "";
     std::string diffuseMapPath = "";
@@ -124,14 +136,18 @@ struct Material {
     Material& withRoughness(float r) { roughness = r; return *this; }
     Material& withMetallic(float m) { metallic = m; return *this; }
     Material& withAO(float a) { ao = a; return *this; }
+    Material& withNormalStrength(float s) { normalStrength = s; return *this; }
+    Material& withUVTiling(const glm::vec2& t) { uvTiling = t; return *this; }
     Material& withEmissive(const glm::vec3& e) { emissive = e; return *this; }
+    Material& withTwoSided(bool ts = true) { twoSided = ts; return *this; }
     Material& withTexture(const std::shared_ptr<Texture>& tex) {
         diffuseMap = tex;
         useDiffuseMap = (tex && tex->valid());
         return *this;
     }
-    Material& withNormalMap(const std::shared_ptr<Texture>& tex) {
+    Material& withNormalMap(const std::shared_ptr<Texture>& tex, float strength = 1.0f) {
         normalMap = tex;
+        normalStrength = strength;
         useNormalMap = (tex && tex->valid());
         return *this;
     }
@@ -287,15 +303,66 @@ struct PostProcessSettings {
     float bloomIntensity = 0.62f;   // сила bloom
     int bloomBlurPasses = 2;
     bool fxaa = true;
+    bool taa = true;
     float vignette = 0.26f;         // 0 — без, 0.5 — сильно
     float exposure = 1.08f;
     float gamma = 2.2f;
     float saturation = 1.06f;
+    bool gtao = true;
+    float gtaoRadius = 1.8f;
+    float gtaoIntensity = 1.0f;
+    bool volumetricFog = true;
+    float fogDensity = 0.0025f;
+    float fogHeightFalloff = 0.15f;
+    float fogHeight = -2.0f;
+    float fogStart = 1.0f;
+    float fogEnd = 120.0f;
+    bool lightShafts = true;
+    float shaftDensity = 0.55f;
+    float shaftWeight = 0.45f;
+    bool ssr = true;
+    bool vxgi = true;
+    bool radialBlur = false;
+    float radialBlurStrength = 0.0f;
+    float chromaticAberration = 0.005f;
 
-    static PostProcessSettings Cinematic() { return {.bloomThreshold=0.90f,.bloomIntensity=0.55f,.vignette=0.34f,.exposure=1.05f}; }
-    static PostProcessSettings Vibrant()   { return {.bloomThreshold=0.80f,.bloomIntensity=0.75f,.vignette=0.22f,.exposure=1.12f}; }
-    static PostProcessSettings Soft()      { return {.bloomThreshold=1.00f,.bloomIntensity=0.42f,.vignette=0.28f,.exposure=1.00f}; }
-    static PostProcessSettings Night()     { return {.bloomThreshold=0.75f,.bloomIntensity=0.85f,.vignette=0.40f,.exposure=1.18f}; }
+    static PostProcessSettings Cinematic() {
+        PostProcessSettings p;
+        p.bloomThreshold = 0.90f;
+        p.bloomIntensity = 0.55f;
+        p.vignette = 0.34f;
+        p.exposure = 1.05f;
+        p.taa = true;
+        p.gtao = true;
+        p.volumetricFog = true;
+        p.ssr = true;
+        p.vxgi = true;
+        return p;
+    }
+    static PostProcessSettings Vibrant() {
+        PostProcessSettings p;
+        p.bloomThreshold = 0.80f;
+        p.bloomIntensity = 0.75f;
+        p.vignette = 0.22f;
+        p.exposure = 1.12f;
+        return p;
+    }
+    static PostProcessSettings Soft() {
+        PostProcessSettings p;
+        p.bloomThreshold = 1.00f;
+        p.bloomIntensity = 0.42f;
+        p.vignette = 0.28f;
+        p.exposure = 1.00f;
+        return p;
+    }
+    static PostProcessSettings Night() {
+        PostProcessSettings p;
+        p.bloomThreshold = 0.75f;
+        p.bloomIntensity = 0.85f;
+        p.vignette = 0.40f;
+        p.exposure = 1.18f;
+        return p;
+    }
 };
 
 // ---------- GUI (kGUI) ----------
@@ -322,6 +389,7 @@ struct Decal {
     float normalFade = 0.5f;
     bool projected = true; // true = OBB volume projection, false = planar quad
     bool visible = true;
+    std::string texturePath = "";
 
     static Decal Create(const std::shared_ptr<Texture>& tex, const glm::vec3& size = {1.0f, 0.5f, 1.0f}, const glm::vec4& color = {1.0f, 1.0f, 1.0f, 1.0f}) {
         Decal d;
@@ -344,3 +412,22 @@ struct CharacterController {
     bool onGround = false;
     void* pxController = nullptr; // PxCapsuleController* at runtime
 };
+
+// ---------- SpringArmComponent (UE4 USpringArmComponent) ----------
+struct SpringArmComponent {
+    Entity target = NullEntity; // Entity to follow; if NullEntity, can track first player or root
+    float targetArmLength = 5.0f; // Distance from target (meters)
+    glm::vec3 socketOffset{0.0f, 1.4f, 0.0f}; // Offset at end of arm
+    glm::vec3 targetOffset{0.0f, 0.6f, 0.0f}; // Offset at target center
+    bool enableCameraLag = true;
+    float cameraLagSpeed = 10.0f;
+    bool enableCameraRotationLag = true;
+    float cameraRotationLagSpeed = 8.0f;
+    bool doCollisionTest = false;
+
+    // Runtime interpolated state
+    glm::vec3 currentPosition{0.0f};
+    glm::vec3 currentRotation{0.0f};
+    bool initialized = false;
+};
+

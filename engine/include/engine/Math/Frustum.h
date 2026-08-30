@@ -34,8 +34,8 @@ struct Frustum {
         float maxDim = std::max({ scaleX, scaleY, scaleZ });
         if (maxDim > 20.0f) return true;
 
-        // Expand AABB by margin to prevent objects from flickering at frustum edges
-        constexpr float kMargin = 0.5f;
+        // Expand AABB by generous margin to prevent objects from flickering at frustum edges
+        constexpr float kMargin = 10.0f;
         glm::vec3 lo = minExtents - glm::vec3(kMargin);
         glm::vec3 hi = maxExtents + glm::vec3(kMargin);
 
